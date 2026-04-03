@@ -19,14 +19,20 @@ spec:
         command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
         ports:
         - containerPort: 5000
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "512Mi"
+          limits:
+            cpu: "500m"
+            memory: "1Gi"
         volumeMounts:
         - name: mlflow-data
           mountPath: /mlflow
       volumes:
       - name: mlflow-data
-        hostPath:
-          path: /mnt/mlflow
-          type: DirectoryOrCreate
+        persistentVolumeClaim:
+          claimName: mlflow-pvc
 ---
 apiVersion: v1
 kind: Service
