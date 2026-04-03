@@ -1,0 +1,49 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jvb
+  namespace: jitsi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jvb
+  template:
+    metadata:
+      labels:
+        app: jvb
+    spec:
+      containers:
+      - name: jvb
+        image: jitsi/jvb:stable
+        envFrom:
+        - configMapRef:
+            name: jitsi-config
+        - secretRef:
+            name: jitsi-secrets
+        ports:
+        - containerPort: 10000
+          protocol: UDP
+        - containerPort: 8080
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jvb
+  namespace: jitsi
+spec:
+  selector:
+    app: jvb
+  ports:
+  - name: media
+    port: 10000
+    protocol: UDP
+  - name: http
+    port: 8080

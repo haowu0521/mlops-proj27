@@ -1,0 +1,44 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jicofo
+  namespace: jitsi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jicofo
+  template:
+    metadata:
+      labels:
+        app: jicofo
+    spec:
+      containers:
+      - name: jicofo
+        image: jitsi/jicofo:stable
+        envFrom:
+        - configMapRef:
+            name: jitsi-config
+        - secretRef:
+            name: jitsi-secrets
+        ports:
+        - containerPort: 8888
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "200Mi"
+          limits:
+            cpu: "300m"
+            memory: "400Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jicofo
+  namespace: jitsi
+spec:
+  selector:
+    app: jicofo
+  ports:
+  - name: http
+    port: 8888

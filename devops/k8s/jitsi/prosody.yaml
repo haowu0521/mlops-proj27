@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prosody
+  namespace: jitsi
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prosody
+  template:
+    metadata:
+      labels:
+        app: prosody
+    spec:
+      containers:
+      - name: prosody
+        image: jitsi/prosody:stable
+        envFrom:
+        - configMapRef:
+            name: jitsi-config
+        - secretRef:
+            name: jitsi-secrets
+        ports:
+        - containerPort: 5222
+        - containerPort: 5280
+        - containerPort: 5347
+        resources:
+          requests:
+            cpu: "50m"
+            memory: "64Mi"
+          limits:
+            cpu: "200m"
+            memory: "256Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prosody
+  namespace: jitsi
+spec:
+  selector:
+    app: prosody
+  ports:
+  - name: xmpp
+    port: 5222
+  - name: http
+    port: 5280
+  - name: component
+    port: 5347
