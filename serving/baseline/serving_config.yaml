@@ -1,0 +1,5 @@
+task_name: meeting_summarization_serving
+model:
+  model_name_or_path: "google/flan-t5-base"
+  max_input_length: 1024
+  max_target_length: 128
