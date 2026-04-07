@@ -43,6 +43,21 @@ flowchart LR
 
 ---
 
+## Online Feature Computation
+
+The system includes an online feature-computation path for inference-time processing.  
+When a transcript arrives, the API computes lightweight summarization features such as:
+- word count
+- speaker count
+- turn count
+- question count
+- action-item cue count
+- decision cue count
+
+These features are stored in PostgreSQL (`online_features`) and can be consumed by downstream summarization models or inference services.
+
+---
+
 ## Setup Instructions
 
 ### 1. Start Infrastructure
