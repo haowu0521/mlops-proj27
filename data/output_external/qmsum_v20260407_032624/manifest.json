@@ -1,0 +1,14 @@
+{
+  "dataset_version": "qmsum_v20260407_032624",
+  "source_dataset": "QMSum",
+  "raw_dir": "external_data/qmsum_raw",
+  "raw_files_seen": 232,
+  "records_after_normalization": 234,
+  "output_file": "output_external/qmsum_v20260407_032624/qmsum_train.jsonl",
+  "created_at": "2026-04-07T03:26:25.033289+00:00",
+  "candidate_selection": {
+    "query_type": "general_query_list",
+    "require_nonempty_transcript": true,
+    "require_nonempty_summary": true
+  }
+}
