@@ -28,6 +28,21 @@ The platform is deployed on a cloud VM (Chameleon Cloud) and uses Docker Compose
 
 ---
 
+## Data Flow
+
+```mermaid
+flowchart LR
+    A[Generator Pipeline] -->|JSONL + manifest| B[MinIO: production bucket]
+    C[QMSum Raw Data] --> D[Ingestion Pipeline]
+    D -->|Normalized JSONL + manifest| B
+    B --> E[Versioned Training Datasets]
+```
+- Generator produces production-style data → stored in MinIO
+- External pipeline ingests QMSum → normalized → stored in MinIO
+- Both datasets are versioned and used for training
+
+---
+
 ## Setup Instructions
 
 ### 1. Start Infrastructure
