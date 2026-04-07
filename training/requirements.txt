@@ -1,0 +1,10 @@
+mlflow
+pyyaml
+pandas
+datasets
+transformers
+evaluate
+rouge_score
+accelerate
+torch
+sentencepiece
