@@ -34,8 +34,11 @@ echo "============================================"
 if ! command -v k3s &> /dev/null; then
     echo "[1/7] Installing k3s ..."
     curl -sfL https://get.k3s.io | sh -
-    echo "Waiting for k3s to be ready ..."
-    $KUBECTL wait --for=condition=Ready node --all --timeout=120s
+    echo "Waiting for k3s node to register ..."
+    until $KUBECTL get nodes 2>/dev/null | grep -q " Ready"; do
+        sleep 3
+    done
+    echo "k3s node is Ready."
 else
     echo "[1/7] k3s already installed, skipping."
 fi
@@ -95,8 +98,11 @@ apply_jitsi_manifest() {
 apply_jitsi_manifest "$K8S_DIR/jitsi/configmap.yaml"
 
 apply_jitsi_manifest "$K8S_DIR/jitsi/prosody.yaml"
-echo "  Waiting for prosody to be ready ..."
-$KUBECTL wait --for=condition=Available deployment/prosody -n jitsi --timeout=120s
+echo "  Waiting for prosody pod to be ready ..."
+until $KUBECTL get deployment prosody -n jitsi 2>/dev/null | grep -q "1/1"; do
+    sleep 3
+done
+echo "  Prosody deployment is ready."
 
 PROSODY_CLUSTER_IP=$($KUBECTL get svc prosody -n jitsi -o jsonpath='{.spec.clusterIP}')
 echo "  Prosody ClusterIP: $PROSODY_CLUSTER_IP"
@@ -117,8 +123,20 @@ $KUBECTL apply -f "$K8S_DIR/mlflow/mlflow.yaml"
 # 7. Verify
 # ------------------------------------------------------------------
 echo "[7/7] Waiting for all deployments ..."
-$KUBECTL wait --for=condition=Available deployment --all -n jitsi    --timeout=180s || true
-$KUBECTL wait --for=condition=Available deployment --all -n platform --timeout=180s || true
+
+echo "  Waiting for jitsi namespace ..."
+for deploy in prosody jicofo jvb web; do
+    until $KUBECTL get deployment "$deploy" -n jitsi 2>/dev/null | grep -q "1/1"; do
+        sleep 5
+    done
+    echo "    $deploy: ready"
+done
+
+echo "  Waiting for platform namespace ..."
+until $KUBECTL get deployment mlflow -n platform 2>/dev/null | grep -q "1/1"; do
+    sleep 5
+done
+echo "    mlflow: ready"
 
 echo ""
 echo "============================================"
