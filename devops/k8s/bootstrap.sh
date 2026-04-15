@@ -128,10 +128,16 @@ $HELM upgrade --install postgres bitnami/postgresql \
     --wait --timeout 10m
 
 echo "      Deploying MinIO ..."
-$HELM upgrade --install minio bitnami/minio \
-    -n platform \
-    -f "$K8S_DIR/minio/values.yaml" \
-    --wait --timeout 10m
+# NOTE: Using official minio/minio image directly (not Bitnami chart) because
+# Bitnami removed minio images from Docker Hub after Aug 2025 subscription
+# change. See minio/minio.yaml for full manifest.
+$KUBECTL apply -f "$K8S_DIR/minio/minio.yaml"
+echo "      Waiting for MinIO deployment ..."
+until $KUBECTL -n platform get deployment minio 2>/dev/null | grep -q "1/1"; do
+    sleep 3
+done
+echo "      Waiting for bucket-creation job ..."
+$KUBECTL -n platform wait --for=condition=complete --timeout=5m job/minio-create-buckets || true
 
 # ------------------------------------------------------------------
 # 7. Deploy MLflow (depends on Postgres + MinIO)
