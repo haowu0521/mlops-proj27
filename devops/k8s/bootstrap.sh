@@ -22,7 +22,10 @@ JVB_PASS="${3:?Error: JVB_PASSWORD is required (arg 3)}"
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 K8S_DIR="$SCRIPT_DIR"
 KUBECTL="sudo kubectl"
-HELM="sudo helm"
+# helm does NOT auto-fallback to /etc/rancher/k3s/k3s.yaml the way k3s kubectl
+# does, and `sudo` strips env vars — so we run helm unprivileged with an
+# explicit KUBECONFIG (chmod 644'd below) instead of `sudo helm`.
+HELM="helm"
 
 NIP_DOMAIN="${FLOATING_IP//./-}.nip.io"
 
