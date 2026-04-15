@@ -1,52 +1,153 @@
 # ---------------------------------------------------------------------------
-# minio/values.yaml — Helm values for bitnami/minio
+# minio/minio.yaml — MinIO S3-compatible object storage (official image)
 #
-# Deploy:
-#   helm install minio bitnami/minio \
-#     -n platform -f minio/values.yaml
+# Replaces bitnami/minio Helm chart, which broke after Bitnami's Aug 2025
+# subscription change (bitnami/minio-object-browser image was removed from
+# Docker Hub).
 #
-# Pre-creates three buckets:
-#   - jitsi-data        : raw meeting audio (Mansour's data team)
-#   - recordings        : Jibri recordings (Jitsi -> S3)
-#   - mlflow-artifacts  : MLflow model + artifact store (Training team)
+# The official `minio/minio` image serves BOTH the S3 API (port 9000) and
+# the web console (port 9001) from one process — no separate sidecar needed.
 #
-# Access:
-#   - S3 API   : http://minio.platform.svc.cluster.local:9000  (in-cluster)
-#   - Console  : NodePort 30901 -> http://<FLOATING_IP>:30901
+# Buckets (jitsi-data, recordings, mlflow-artifacts) are created by a
+# post-install Job (see below) using `mc`.
 # ---------------------------------------------------------------------------
 
-auth:
-  rootUser: minio
-  rootPassword: minio123
-
-# Standalone mode (not distributed) — adequate for coursework scale
-mode: standalone
-
-persistence:
-  enabled: true
-  storageClass: local-path
-  size: 40Gi
-
-# Pre-create buckets at install time
-defaultBuckets: "jitsi-data,recordings,mlflow-artifacts"
-
-service:
-  type: ClusterIP          # S3 API stays internal
+apiVersion: v1
+kind: Secret
+metadata:
+  name: minio-credentials
+  namespace: platform
+type: Opaque
+stringData:
+  MINIO_ROOT_USER: minio
+  MINIO_ROOT_PASSWORD: minio123
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: minio
+  namespace: platform
+spec:
+  accessModes:
+  - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 40Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: minio
+  namespace: platform
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate          # single PVC, no rolling update
+  selector:
+    matchLabels:
+      app: minio
+  template:
+    metadata:
+      labels:
+        app: minio
+    spec:
+      containers:
+      - name: minio
+        image: minio/minio:RELEASE.2025-02-28T09-55-16Z
+        args:
+        - server
+        - /data
+        - --console-address
+        - :9001
+        envFrom:
+        - secretRef:
+            name: minio-credentials
+        ports:
+        - containerPort: 9000
+          name: s3
+        - containerPort: 9001
+          name: console
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "1000m"
+            memory: "1Gi"
+        readinessProbe:
+          httpGet:
+            path: /minio/health/ready
+            port: 9000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: data
+        persistentVolumeClaim:
+          claimName: minio
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+  namespace: platform
+spec:
+  type: ClusterIP
+  selector:
+    app: minio
   ports:
-    api: 9000
-    console: 9001
-
-# Expose web console via NodePort for debugging / manual upload
-console:
-  service:
-    type: NodePort
-    nodePorts:
-      console: "30901"
-
-resources:
-  requests:
-    cpu: "100m"
-    memory: "256Mi"
-  limits:
-    cpu: "1000m"
-    memory: "1Gi"
+  - port: 9000
+    targetPort: 9000
+    name: s3
+---
+# Console exposed via NodePort for browser access
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio-console
+  namespace: platform
+spec:
+  type: NodePort
+  selector:
+    app: minio
+  ports:
+  - port: 9001
+    targetPort: 9001
+    nodePort: 30901
+    name: console
+---
+# One-shot Job: create default buckets once MinIO is up
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: minio-create-buckets
+  namespace: platform
+spec:
+  backoffLimit: 10
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: mc
+        image: minio/mc:RELEASE.2025-02-21T16-00-46Z
+        envFrom:
+        - secretRef:
+            name: minio-credentials
+        command:
+        - /bin/sh
+        - -c
+        - |
+          set -eu
+          # Wait for MinIO to be reachable
+          until mc alias set local http://minio.platform.svc.cluster.local:9000 \
+                "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD"; do
+            echo "waiting for minio..."; sleep 3
+          done
+          mc mb --ignore-existing local/jitsi-data
+          mc mb --ignore-existing local/recordings
+          mc mb --ignore-existing local/mlflow-artifacts
+          echo "buckets ready:"
+          mc ls local
