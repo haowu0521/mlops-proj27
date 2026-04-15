@@ -294,7 +294,7 @@ def train(cfg: Dict[str, Any]) -> None:
         )
 
         data_collator = DataCollatorForSeq2Seq(
-            tokenizer=tokenizer,
+            processing_class=tokenizer,
             model=model,
             padding="longest",
         )
