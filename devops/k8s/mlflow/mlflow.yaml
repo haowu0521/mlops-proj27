@@ -1,3 +1,30 @@
+# ---------------------------------------------------------------------------
+# mlflow.yaml — MLflow tracking server
+#
+# Architecture:
+#   - Backend store    : Postgres `mlflow` database (metadata, runs, metrics)
+#   - Artifact store   : MinIO bucket `mlflow-artifacts` (models, large files)
+#
+# This replaces the old hostPath-based deployment. Artifacts are now
+# addressable as `s3://mlflow-artifacts/...` from ANY pod that has the
+# MinIO credentials — which means Serving can pull models at inference
+# time without sharing a filesystem with Training.
+# ---------------------------------------------------------------------------
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mlflow-secrets
+  namespace: platform
+type: Opaque
+stringData:
+  # Backend (Postgres)
+  BACKEND_URI: "postgresql://mlflow:mlflow_pass@postgres-postgresql.platform.svc.cluster.local:5432/mlflow"
+  # Artifact store (MinIO via S3 API)
+  AWS_ACCESS_KEY_ID: "minio"
+  AWS_SECRET_ACCESS_KEY: "minio123"
+  MLFLOW_S3_ENDPOINT_URL: "http://minio.platform.svc.cluster.local:9000"
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -13,26 +40,69 @@ spec:
       labels:
         app: mlflow
     spec:
+      # Install psycopg2 + boto3 on startup (official image is minimal)
+      initContainers:
+      - name: install-deps
+        image: ghcr.io/mlflow/mlflow:v2.19.0
+        command:
+        - /bin/sh
+        - -c
+        - |
+          pip install --target=/deps psycopg2-binary boto3
+        volumeMounts:
+        - name: deps
+          mountPath: /deps
       containers:
       - name: mlflow
         image: ghcr.io/mlflow/mlflow:v2.19.0
-        command: ["mlflow", "server", "--host", "0.0.0.0", "--port", "5000"]
+        env:
+        - name: PYTHONPATH
+          value: "/deps"
+        - name: BACKEND_URI
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: BACKEND_URI
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: AWS_ACCESS_KEY_ID
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: AWS_SECRET_ACCESS_KEY
+        - name: MLFLOW_S3_ENDPOINT_URL
+          valueFrom:
+            secretKeyRef:
+              name: mlflow-secrets
+              key: MLFLOW_S3_ENDPOINT_URL
+        command:
+        - /bin/sh
+        - -c
+        - |
+          mlflow server \
+            --host 0.0.0.0 \
+            --port 5000 \
+            --backend-store-uri "$BACKEND_URI" \
+            --default-artifact-root s3://mlflow-artifacts/ \
+            --serve-artifacts
         ports:
         - containerPort: 5000
         resources:
           requests:
-            cpu: "50m"
+            cpu: "100m"
             memory: "512Mi"
           limits:
-            cpu: "500m"
-            memory: "1Gi"
+            cpu: "1000m"
+            memory: "2Gi"
         volumeMounts:
-        - name: mlflow-data
-          mountPath: /mlflow
+        - name: deps
+          mountPath: /deps
       volumes:
-      - name: mlflow-data
-        persistentVolumeClaim:
-          claimName: mlflow-pvc
+      - name: deps
+        emptyDir: {}
 ---
 apiVersion: v1
 kind: Service

@@ -1,0 +1,48 @@
+# ---------------------------------------------------------------------------
+# postgres/values.yaml — Helm values for bitnami/postgresql
+#
+# Deploy:
+#   helm install postgres bitnami/postgresql \
+#     -n platform -f postgres/values.yaml
+#
+# Creates ONE Postgres server hosting TWO logical databases:
+#   - jitsi_mlops  : owned by `user`      (Mansour's data team schema)
+#   - mlflow       : owned by `mlflow`    (MLflow backend store, auto-managed)
+#
+# Data persists to a PVC carved out of /mnt/block via the local-path
+# StorageClass (see storage.yaml). Surviving a pod restart = automatic.
+# ---------------------------------------------------------------------------
+
+auth:
+  # Superuser — used for admin + as Mansour's `user` for jitsi_mlops DB
+  username: user
+  password: jitsi_postgres
+  database: jitsi_mlops
+  postgresPassword: jitsi_postgres   # postgres superuser password
+
+primary:
+  persistence:
+    enabled: true
+    storageClass: local-path
+    size: 20Gi
+
+  # Extra init: create second DB + dedicated MLflow role
+  initdb:
+    scripts:
+      01_mlflow.sql: |
+        CREATE DATABASE mlflow;
+        CREATE USER mlflow WITH PASSWORD 'mlflow_pass';
+        GRANT ALL PRIVILEGES ON DATABASE mlflow TO mlflow;
+        \c mlflow
+        GRANT ALL ON SCHEMA public TO mlflow;
+
+  resources:
+    requests:
+      cpu: "100m"
+      memory: "256Mi"
+    limits:
+      cpu: "1000m"
+      memory: "1Gi"
+
+service:
+  type: ClusterIP   # only reachable inside cluster; hostname: postgres.platform.svc.cluster.local

@@ -1,0 +1,52 @@
+# ---------------------------------------------------------------------------
+# minio/values.yaml — Helm values for bitnami/minio
+#
+# Deploy:
+#   helm install minio bitnami/minio \
+#     -n platform -f minio/values.yaml
+#
+# Pre-creates three buckets:
+#   - jitsi-data        : raw meeting audio (Mansour's data team)
+#   - recordings        : Jibri recordings (Jitsi -> S3)
+#   - mlflow-artifacts  : MLflow model + artifact store (Training team)
+#
+# Access:
+#   - S3 API   : http://minio.platform.svc.cluster.local:9000  (in-cluster)
+#   - Console  : NodePort 30901 -> http://<FLOATING_IP>:30901
+# ---------------------------------------------------------------------------
+
+auth:
+  rootUser: minio
+  rootPassword: minio123
+
+# Standalone mode (not distributed) — adequate for coursework scale
+mode: standalone
+
+persistence:
+  enabled: true
+  storageClass: local-path
+  size: 40Gi
+
+# Pre-create buckets at install time
+defaultBuckets: "jitsi-data,recordings,mlflow-artifacts"
+
+service:
+  type: ClusterIP          # S3 API stays internal
+  ports:
+    api: 9000
+    console: 9001
+
+# Expose web console via NodePort for debugging / manual upload
+console:
+  service:
+    type: NodePort
+    nodePorts:
+      console: "30901"
+
+resources:
+  requests:
+    cpu: "100m"
+    memory: "256Mi"
+  limits:
+    cpu: "1000m"
+    memory: "1Gi"
