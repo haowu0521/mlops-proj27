@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -222,16 +223,18 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         model_dir = context.artifacts["hf_model_dir"]
         self.tokenizer = AutoTokenizer.from_pretrained(model_dir)
         self.model = AutoModelForSeq2SeqLM.from_pretrained(model_dir)
+
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
         self.pipe = pipeline(
             "summarization",
             model=self.model,
             tokenizer=self.tokenizer,
-            device=-1,
+            device=-1,  # CPU-safe for registry loading
         )
 
-    def predict(self, context, model_input, params=None):
+    def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
         if isinstance(model_input, pd.DataFrame):
             if "text" in model_input.columns:
                 texts = model_input["text"].astype(str).tolist()
@@ -256,7 +259,7 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         return pd.DataFrame({"summary": summaries})
 
 
-def log_and_optionally_register_model(output_dir: str, cfg: Dict[str, Any], run_id: str):
+def log_and_optionally_register_model(output_dir: str, run_id: str, cfg: Dict[str, Any]):
     registered_model_name = (
         cfg.get("mlflow", {}).get("registered_model_name")
         or os.environ.get("MLFLOW_REGISTERED_MODEL_NAME")
@@ -270,23 +273,35 @@ def log_and_optionally_register_model(output_dir: str, cfg: Dict[str, Any], run_
         }
     )
 
-    model_info = mlflow.pyfunc.log_model(
-        artifact_path="registered_model",
-        python_model=SummarizationPyFuncModel(),
-        artifacts={"hf_model_dir": str(Path(output_dir).resolve())},
-        input_example=input_example,
-        pip_requirements=[
-            "mlflow",
-            "transformers",
-            "torch",
-            "sentencepiece",
-            "pandas",
-        ],
-        registered_model_name=registered_model_name,
-    )
+    with tempfile.TemporaryDirectory() as tmpdir:
+        local_model_dir = Path(tmpdir) / "registered_model"
+
+        mlflow.pyfunc.save_model(
+            path=str(local_model_dir),
+            python_model=SummarizationPyFuncModel(),
+            artifacts={"hf_model_dir": str(Path(output_dir).resolve())},
+            input_example=input_example,
+            pip_requirements=[
+                "mlflow==2.19.0",
+                "transformers",
+                "torch",
+                "sentencepiece",
+                "pandas",
+            ],
+        )
+
+        mlflow.log_artifacts(str(local_model_dir), artifact_path="registered_model")
 
     model_uri = f"runs:/{run_id}/registered_model"
-    return model_uri, registered_model_name, model_info
+
+    if registered_model_name:
+        registration = mlflow.register_model(
+            model_uri=model_uri,
+            name=registered_model_name,
+        )
+        return model_uri, registered_model_name, registration
+
+    return model_uri, None, None
 
 
 def train(cfg: Dict[str, Any]) -> None:
@@ -458,10 +473,13 @@ def train(cfg: Dict[str, Any]) -> None:
 
         mlflow.log_artifact(str(config_dump_path))
 
+        # 记录完整 HF 模型目录，便于后续查看
+        mlflow.log_artifacts(output_dir, artifact_path="hf_model_files")
+
         model_uri, registered_model_name, _ = log_and_optionally_register_model(
             output_dir=output_dir,
-            cfg=cfg,
             run_id=run_id,
+            cfg=cfg,
         )
 
         print("\nTraining finished successfully.")
