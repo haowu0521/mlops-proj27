@@ -11,13 +11,13 @@ data:
   dataset_config: null
 
   train_file: "data/sample_retraining_data.jsonl"
-  validation_file: null
+  validation_file: "data/retraining_ready_val.jsonl"
   test_file: null
 
   text_column: "input_transcript"
   summary_column: "target_summary"
 
-  validation_split: 0.34
+  validation_split: 0.2
   make_test_from_validation: false
 
   max_train_samples: 3
