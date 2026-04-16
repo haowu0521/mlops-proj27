@@ -95,12 +95,13 @@ metadata:
   name: minio
   namespace: platform
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: minio
   ports:
   - port: 9000
     targetPort: 9000
+    nodePort: 30900
     name: s3
 ---
 # Console exposed via NodePort for browser access
