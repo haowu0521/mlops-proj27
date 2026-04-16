@@ -50,7 +50,6 @@ def choose_target_summary(record: Dict[str, Any], min_rating_for_unedited: int) 
             return True, edited_summary
         return False, ""
 
-    # 没编辑但评分高，也可以作为弱监督样本
     if rating is not None and int(rating) >= min_rating_for_unedited and original_summary:
         return True, original_summary
 
@@ -96,7 +95,6 @@ def convert_records(
 
 
 def sort_records_for_time_split(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    # 没有 created_at 的会被排到前面；有的话按字符串排序
     return sorted(records, key=lambda x: str(x.get("created_at", "")))
 
 
@@ -126,7 +124,7 @@ def write_jsonl(records: List[Dict[str, Any]], path: str) -> None:
 
 def main():
     parser = argparse.ArgumentParser(description="Prepare retraining-ready dataset from user feedback.")
-    parser.add_argument("--input", type=str, required=True, help="Path to feedback JSON/JSONL file")
+    parser.add_argument("--input", type=str, required=True, help="Path to feedback JSON or JSONL file")
     parser.add_argument("--train-output", type=str, required=True, help="Path to output retraining train JSONL")
     parser.add_argument("--val-output", type=str, default="", help="Optional path to validation JSONL")
     parser.add_argument("--min-rating-for-unedited", type=int, default=4)
