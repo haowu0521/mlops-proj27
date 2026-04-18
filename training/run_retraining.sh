@@ -59,11 +59,12 @@ if [[ "$TRAIN_LINES" -eq 0 ]]; then
 fi
 
 echo "Step 2/3: Generating retraining config..."
-python - "$BASE_CONFIG" "$GENERATED_CONFIG" "$TRAIN_OUTPUT" "$VAL_OUTPUT" <<'PY'
+python - "$BASE_CONFIG" "$GENERATED_CONFIG" "$TRAIN_OUTPUT" "$VAL_OUTPUT" "$VAL_LINES" <<'PY'
 import sys
 import yaml
 
-base_config, output_config, train_file, val_file = sys.argv[1:5]
+base_config, output_config, train_file, val_file, val_lines = sys.argv[1:6]
+val_lines = int(val_lines)
 
 with open(base_config, "r", encoding="utf-8") as f:
     cfg = yaml.safe_load(f)
@@ -72,16 +73,22 @@ cfg.setdefault("data", {})
 cfg["data"]["dataset_name"] = None
 cfg["data"]["dataset_config"] = None
 cfg["data"]["train_file"] = train_file
-cfg["data"]["validation_file"] = val_file if val_file else None
 cfg["data"]["test_file"] = None
 cfg["data"]["text_column"] = "input_transcript"
 cfg["data"]["summary_column"] = "target_summary"
 cfg["data"]["make_test_from_validation"] = False
 
+if val_lines > 0:
+    cfg["data"]["validation_file"] = val_file
+else:
+    cfg["data"]["validation_file"] = None
+    cfg["data"]["validation_split"] = 0.2
+
 with open(output_config, "w", encoding="utf-8") as f:
     yaml.safe_dump(cfg, f, sort_keys=False, allow_unicode=True)
 
 print(f"Generated config: {output_config}")
+print(f"Validation file used: {cfg['data']['validation_file']}")
 PY
 
 echo "Step 3/3: Starting retraining..."
