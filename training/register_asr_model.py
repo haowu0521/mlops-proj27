@@ -1,6 +1,7 @@
 import os
 import tempfile
 from pathlib import Path
+from typing import Any, Dict, List
 
 import mlflow
 import mlflow.pyfunc
@@ -11,47 +12,54 @@ from faster_whisper import WhisperModel
 class FasterWhisperPyFuncModel(mlflow.pyfunc.PythonModel):
     def load_context(self, context):
         model_size_or_path = context.artifacts["asr_model"]
-        compute_type = context.model_config.get("compute_type", "int8")
-        device = context.model_config.get("device", "cpu")
+
+        model_config = getattr(context, "model_config", {}) or {}
+        self.device = model_config.get("device", "cpu")
+        self.compute_type = model_config.get("compute_type", "int8")
+        self.beam_size = int(model_config.get("beam_size", 5))
 
         self.model = WhisperModel(
             model_size_or_path,
-            device=device,
-            compute_type=compute_type,
+            device=self.device,
+            compute_type=self.compute_type,
         )
 
     def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
         if not isinstance(model_input, pd.DataFrame):
             raise ValueError("Input must be a pandas DataFrame.")
 
-        if "audio_path" not in model_input.columns:
-            raise ValueError("Input DataFrame must contain an 'audio_path' column.")
+        required_cols = {"meeting_id", "audio_path"}
+        missing = required_cols.difference(model_input.columns)
+        if missing:
+            raise ValueError(f"Missing required input columns: {missing}")
 
-        language = None
-        if "language" in model_input.columns and len(model_input["language"]) > 0:
-            language = model_input["language"].iloc[0]
+        results: List[Dict[str, Any]] = []
 
-        results = []
         for _, row in model_input.iterrows():
+            meeting_id = str(row["meeting_id"])
             audio_path = str(row["audio_path"])
-            meeting_id = str(row["meeting_id"]) if "meeting_id" in row else None
+
+            language = None
+            if "language" in model_input.columns and pd.notna(row.get("language")):
+                language = str(row["language"])
 
             segments, info = self.model.transcribe(
                 audio_path,
                 language=language,
-                beam_size=5,
+                beam_size=self.beam_size,
             )
 
-            segment_list = []
-            full_text = []
+            segment_items = []
+            transcript_parts = []
+
             for seg in segments:
-                seg_text = seg.text.strip()
-                full_text.append(seg_text)
-                segment_list.append(
+                text = seg.text.strip()
+                transcript_parts.append(text)
+                segment_items.append(
                     {
-                        "start": seg.start,
-                        "end": seg.end,
-                        "text": seg_text,
+                        "start": float(seg.start),
+                        "end": float(seg.end),
+                        "text": text,
                     }
                 )
 
@@ -59,66 +67,83 @@ class FasterWhisperPyFuncModel(mlflow.pyfunc.PythonModel):
                 {
                     "meeting_id": meeting_id,
                     "language": info.language,
-                    "transcript": " ".join(full_text),
-                    "segments": segment_list,
+                    "transcript": " ".join(transcript_parts).strip(),
+                    "segments": segment_items,
                 }
             )
 
         return pd.DataFrame(results)
 
 
-def main():
+def register_asr_model() -> None:
     tracking_uri = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.182:30500")
-    os.environ["MLFLOW_TRACKING_URI"] = tracking_uri
+    experiment_name = os.environ.get("MLFLOW_EXPERIMENT_NAME", "jitsi-asr")
+    registered_model_name = os.environ.get("MLFLOW_ASR_REGISTERED_MODEL_NAME", "jitsi-asr")
 
-    # 你们共享平台如果还是 MinIO，需要这几个环境变量先 export 好
-    # export MLFLOW_S3_ENDPOINT_URL=http://129.114.26.182:30900
-    # export AWS_ACCESS_KEY_ID=minio
-    # export AWS_SECRET_ACCESS_KEY=minio123
-
-    experiment_name = "jitsi-asr"
-    registered_model_name = "jitsi-asr"
+    model_size_or_path = os.environ.get("ASR_MODEL_SIZE_OR_PATH", "small")
+    device = os.environ.get("ASR_DEVICE", "cpu")
+    compute_type = os.environ.get("ASR_COMPUTE_TYPE", "int8")
+    beam_size = int(os.environ.get("ASR_BEAM_SIZE", "5"))
 
     mlflow.set_tracking_uri(tracking_uri)
     mlflow.set_experiment(experiment_name)
 
     input_example = pd.DataFrame(
-        {
-            "meeting_id": ["demo_001"],
-            "audio_path": ["/tmp/demo.wav"],
-            "language": ["en"],
-        }
+        [
+            {
+                "meeting_id": "demo_001",
+                "audio_path": "/data/recordings/demo_001.wav",
+                "language": "en",
+                "source": "jitsi_recording",
+            }
+        ]
     )
 
-    with mlflow.start_run(run_name="faster_whisper_small_register"):
-        model_name_or_path = "small"
+    with mlflow.start_run(run_name="faster_whisper_small_register") as active_run:
+        run_id = active_run.info.run_id
 
         mlflow.log_param("asr_backend", "faster-whisper")
-        mlflow.log_param("model_name_or_path", model_name_or_path)
-        mlflow.log_param("device", "cpu")
-        mlflow.log_param("compute_type", "int8")
+        mlflow.log_param("model_size_or_path", model_size_or_path)
+        mlflow.log_param("device", device)
+        mlflow.log_param("compute_type", compute_type)
+        mlflow.log_param("beam_size", beam_size)
+        mlflow.log_param("registered_model_name", registered_model_name)
 
-        model_info = mlflow.pyfunc.log_model(
-            artifact_path="registered_asr_model",
-            python_model=FasterWhisperPyFuncModel(),
-            artifacts={"asr_model": model_name_or_path},
-            input_example=input_example,
-            registered_model_name=registered_model_name,
-            pip_requirements=[
-                "mlflow==2.19.0",
-                "faster-whisper",
-                "pandas",
-            ],
-            model_config={
-                "device": "cpu",
-                "compute_type": "int8",
-            },
+        with tempfile.TemporaryDirectory() as tmpdir:
+            local_model_dir = Path(tmpdir) / "registered_asr_model"
+
+            mlflow.pyfunc.save_model(
+                path=str(local_model_dir),
+                python_model=FasterWhisperPyFuncModel(),
+                artifacts={"asr_model": model_size_or_path},
+                input_example=input_example,
+                pip_requirements=[
+                    "mlflow==2.19.0",
+                    "faster-whisper",
+                    "pandas",
+                ],
+                model_config={
+                    "device": device,
+                    "compute_type": compute_type,
+                    "beam_size": beam_size,
+                },
+            )
+
+            mlflow.log_artifacts(str(local_model_dir), artifact_path="registered_asr_model")
+
+        model_uri = f"runs:/{run_id}/registered_asr_model"
+        registration = mlflow.register_model(
+            model_uri=model_uri,
+            name=registered_model_name,
         )
 
         print("ASR model registered successfully.")
-        print(f"Model URI: {model_info.model_uri}")
+        print(f"MLflow tracking URI: {tracking_uri}")
+        print(f"MLflow experiment: {experiment_name}")
+        print(f"Model URI: {model_uri}")
         print(f"Registered model name: {registered_model_name}")
+        print(f"Registered version: {registration.version}")
 
 
 if __name__ == "__main__":
-    main()
+    register_asr_model()
