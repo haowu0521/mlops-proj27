@@ -3,7 +3,7 @@ import os
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, List, Optional
 
 import boto3
 import mlflow.pyfunc
@@ -24,6 +24,14 @@ DEFAULT_LANGUAGE = os.environ.get("DEFAULT_LANGUAGE", "en")
 TRANSCRIPT_BUCKET = os.environ.get("TRANSCRIPT_BUCKET", "jitsi-data")
 REVIEWER_ID = os.environ.get("REVIEWER_ID", "auto_test_user")
 
+REQUEST_CONNECT_TIMEOUT = int(os.environ.get("REQUEST_CONNECT_TIMEOUT", "10"))
+REQUEST_READ_TIMEOUT = int(os.environ.get("REQUEST_READ_TIMEOUT", "120"))
+
+AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".flac", ".ogg", ".aac", ".webm", ".mp4"}
+
+_ASR_MODEL = None
+_SUMMARIZATION_MODEL = None
+
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
@@ -36,6 +44,26 @@ def get_s3_client():
         aws_access_key_id=AWS_ACCESS_KEY_ID,
         aws_secret_access_key=AWS_SECRET_ACCESS_KEY,
     )
+
+
+def is_audio_file(object_key: str) -> bool:
+    return Path(object_key).suffix.lower() in AUDIO_EXTENSIONS
+
+
+def list_audio_objects(bucket: str, prefix: str = "") -> List[str]:
+    s3 = get_s3_client()
+    paginator = s3.get_paginator("list_objects_v2")
+
+    keys: List[str] = []
+    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith("/"):
+                continue
+            if is_audio_file(key):
+                keys.append(key)
+
+    return sorted(keys)
 
 
 def download_from_minio(bucket: str, object_key: str) -> str:
@@ -59,8 +87,26 @@ def upload_text_to_minio(bucket: str, object_key: str, text: str) -> None:
     )
 
 
+def get_asr_model():
+    global _ASR_MODEL
+    if _ASR_MODEL is None:
+        print(f"[Model] Loading ASR model from {ASR_MODEL_URI}", flush=True)
+        _ASR_MODEL = mlflow.pyfunc.load_model(ASR_MODEL_URI)
+        print("[Model] ASR model loaded", flush=True)
+    return _ASR_MODEL
+
+
+def get_summarization_model():
+    global _SUMMARIZATION_MODEL
+    if _SUMMARIZATION_MODEL is None:
+        print(f"[Model] Loading summarization model from {SUMMARIZATION_MODEL_URI}", flush=True)
+        _SUMMARIZATION_MODEL = mlflow.pyfunc.load_model(SUMMARIZATION_MODEL_URI)
+        print("[Model] Summarization model loaded", flush=True)
+    return _SUMMARIZATION_MODEL
+
+
 def run_asr(local_audio_path: str, meeting_id: str, language: str) -> Dict[str, Any]:
-    model = mlflow.pyfunc.load_model(ASR_MODEL_URI)
+    model = get_asr_model()
 
     df = pd.DataFrame([
         {
@@ -72,16 +118,25 @@ def run_asr(local_audio_path: str, meeting_id: str, language: str) -> Dict[str, 
     ])
 
     result = model.predict(df)
-    records = result.to_dict(orient="records")
+
+    if isinstance(result, pd.DataFrame):
+        records = result.to_dict(orient="records")
+    elif isinstance(result, list):
+        records = result
+    else:
+        raise RuntimeError(f"Unexpected ASR output type: {type(result)}")
 
     if not records:
         raise RuntimeError("ASR model returned empty result.")
+
+    if not isinstance(records[0], dict):
+        raise RuntimeError(f"Unexpected ASR record type: {type(records[0])}")
 
     return records[0]
 
 
 def run_summarization(transcript_text: str) -> str:
-    model = mlflow.pyfunc.load_model(SUMMARIZATION_MODEL_URI)
+    model = get_summarization_model()
 
     df = pd.DataFrame([{"text": transcript_text}])
     result = model.predict(df)
@@ -98,16 +153,20 @@ def run_summarization(transcript_text: str) -> str:
 
 
 def post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-    resp = requests.post(url, json=payload, timeout=120)
+    resp = requests.post(
+        url,
+        json=payload,
+        timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+    )
 
     if not resp.ok:
-        print("\nPOST failed")
-        print("URL:", url)
-        print("Payload:")
-        print(json.dumps(payload, indent=2, ensure_ascii=False))
-        print("Status code:", resp.status_code)
-        print("Response text:")
-        print(resp.text)
+        print("\nPOST failed", flush=True)
+        print("URL:", url, flush=True)
+        print("Payload:", flush=True)
+        print(json.dumps(payload, indent=2, ensure_ascii=False), flush=True)
+        print("Status code:", resp.status_code, flush=True)
+        print("Response text:", flush=True)
+        print(resp.text, flush=True)
         resp.raise_for_status()
 
     try:
@@ -117,13 +176,17 @@ def post_json(url: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def get_json_or_text(url: str) -> Any:
-    resp = requests.get(url, timeout=120)
+    resp = requests.get(
+        url,
+        timeout=(REQUEST_CONNECT_TIMEOUT, REQUEST_READ_TIMEOUT),
+    )
+
     if not resp.ok:
-        print("\nGET failed")
-        print("URL:", url)
-        print("Status code:", resp.status_code)
-        print("Response text:")
-        print(resp.text)
+        print("\nGET failed", flush=True)
+        print("URL:", url, flush=True)
+        print("Status code:", resp.status_code, flush=True)
+        print("Response text:", flush=True)
+        print(resp.text, flush=True)
         resp.raise_for_status()
 
     try:
@@ -207,50 +270,73 @@ def create_review(
     return post_json(f"{DATA_API_BASE}/reviews", payload)
 
 
-def main():
-    meeting_id = os.environ.get("MEETING_ID", "demo_001")
-    bucket = os.environ.get("MINIO_BUCKET", "audio-files")
-    object_key = os.environ.get("MINIO_OBJECT_KEY")
-    language = os.environ.get("ASR_LANGUAGE", DEFAULT_LANGUAGE)
+def extract_meeting_id(meeting_resp: Any) -> str:
+    if isinstance(meeting_resp, dict):
+        for key in ("meeting_id", "id", "uuid"):
+            value = meeting_resp.get(key)
+            if value:
+                return str(value)
 
-    if not object_key:
-        raise ValueError("MINIO_OBJECT_KEY is required.")
+    raise RuntimeError(
+        f"Could not find meeting_id in create_meeting response: {meeting_resp}"
+    )
 
-    print("=== Step 0: Create meeting record ===")
+
+def process_single_audio(bucket: str, object_key: str, language: str) -> Dict[str, Any]:
+    print("\n" + "=" * 80, flush=True)
+    print(f"Processing audio object: {bucket}/{object_key}", flush=True)
+    print("=" * 80, flush=True)
+
+    local_audio_path: Optional[str] = None
+
+    print("=== Step 0: Create meeting record ===", flush=True)
     meeting_resp = create_meeting(audio_object_key=object_key, source="minio_audio")
-    print("Meeting API response:")
-    print(meeting_resp)
+    print("Meeting API response:", flush=True)
+    print(meeting_resp, flush=True)
 
-    print("\n=== Step 1: Download audio from MinIO ===")
-    local_audio_path = download_from_minio(bucket, object_key)
-    print(f"Downloaded to: {local_audio_path}")
+    meeting_id = extract_meeting_id(meeting_resp)
+    print(f"Resolved meeting_id: {meeting_id}", flush=True)
 
     try:
-        print("\n=== Step 2: Run ASR model ===")
-        asr_output = run_asr(local_audio_path, meeting_id, language)
-        print(json.dumps(asr_output, indent=2, ensure_ascii=False))
+        print("\n=== Step 1: Download audio from MinIO ===", flush=True)
+        local_audio_path = download_from_minio(bucket, object_key)
+        print(f"Downloaded to: {local_audio_path}", flush=True)
 
-        transcript_text = asr_output["transcript"]
+        print("\n=== Step 2: Run ASR model ===", flush=True)
+        asr_output = run_asr(local_audio_path, meeting_id, language)
+        print(json.dumps(asr_output, indent=2, ensure_ascii=False), flush=True)
+
+        transcript_text = (
+            asr_output.get("transcript")
+            or asr_output.get("text")
+            or ""
+        ).strip()
+
+        if not transcript_text:
+            raise RuntimeError(f"No transcript text found in ASR output: {asr_output}")
 
         transcript_object_key = f"transcripts/{meeting_id}.txt"
 
-        print("\n=== Step 3: Upload transcript text to MinIO ===")
+        print("\n=== Step 3: Upload transcript text to MinIO ===", flush=True)
         upload_text_to_minio(TRANSCRIPT_BUCKET, transcript_object_key, transcript_text)
-        print(f"Uploaded transcript to minio://{TRANSCRIPT_BUCKET}/{transcript_object_key}")
+        print(
+            f"Uploaded transcript to minio://{TRANSCRIPT_BUCKET}/{transcript_object_key}",
+            flush=True,
+        )
 
-        print("\n=== Step 4: Store ASR output into /transcripts ===")
+        print("\n=== Step 4: Store ASR output into /transcripts ===", flush=True)
         transcript_resp = create_transcript(
             meeting_id=meeting_id,
             transcript_text=transcript_text,
             transcript_object_key=transcript_object_key,
         )
-        print("Transcript API response:")
-        print(transcript_resp)
+        print("Transcript API response:", flush=True)
+        print(transcript_resp, flush=True)
 
-        print("\n=== Step 5: Read transcript back from API ===")
+        print("\n=== Step 5: Read transcript back from API ===", flush=True)
         transcript_record = get_transcript_by_meeting(meeting_id)
-        print("Transcript fetched by meeting:")
-        print(transcript_record)
+        print("Transcript fetched by meeting:", flush=True)
+        print(transcript_record, flush=True)
 
         if isinstance(transcript_record, dict):
             summarization_input = (
@@ -261,24 +347,24 @@ def main():
         else:
             summarization_input = str(transcript_record)
 
-        print("\n=== Step 6: Run summarization model ===")
+        print("\n=== Step 6: Run summarization model ===", flush=True)
         summary_text = run_summarization(summarization_input)
-        print("Summary output:")
-        print(summary_text)
+        print("Summary output:", flush=True)
+        print(summary_text, flush=True)
 
         action_item_text = ""
 
-        print("\n=== Step 7: Store summary into /summaries ===")
+        print("\n=== Step 7: Store summary into /summaries ===", flush=True)
         summary_resp = create_summary(
             meeting_id=meeting_id,
             summary_text=summary_text,
             action_item_text=action_item_text,
             model_version=SUMMARIZATION_MODEL_VERSION,
         )
-        print("Summary API response:")
-        print(summary_resp)
+        print("Summary API response:", flush=True)
+        print(summary_resp, flush=True)
 
-        print("\n=== Step 8: Store review into /reviews ===")
+        print("\n=== Step 8: Store review into /reviews ===", flush=True)
         review_resp = create_review(
             meeting_id=meeting_id,
             reviewer_id=REVIEWER_ID,
@@ -289,16 +375,85 @@ def main():
             edited_action_items=action_item_text,
             review_notes="auto-created test review",
         )
-        print("Review API response:")
-        print(review_resp)
+        print("Review API response:", flush=True)
+        print(review_resp, flush=True)
 
-        print("\n=== Pipeline finished successfully ===")
+        print("\n=== Pipeline finished successfully for this file ===", flush=True)
+
+        return {
+            "meeting_id": meeting_id,
+            "object_key": object_key,
+            "status": "success",
+        }
 
     finally:
+        if local_audio_path:
+            try:
+                os.remove(local_audio_path)
+            except Exception:
+                pass
+
+
+def main():
+    bucket = os.environ.get("MINIO_BUCKET", "audio-files")
+    object_key = os.environ.get("MINIO_OBJECT_KEY")
+    prefix = os.environ.get("MINIO_PREFIX", "")
+    language = os.environ.get("ASR_LANGUAGE", DEFAULT_LANGUAGE)
+    max_files = int(os.environ.get("MAX_FILES", "0"))
+    fail_fast = os.environ.get("FAIL_FAST", "false").lower() == "true"
+
+    if not bucket:
+        raise ValueError("MINIO_BUCKET is required.")
+
+    if object_key:
+        object_keys = [object_key]
+        print(f"[Config] Single-file mode. MINIO_OBJECT_KEY={object_key}", flush=True)
+    else:
+        print(
+            f"[Config] Batch mode. Listing audio files from bucket='{bucket}', prefix='{prefix}'",
+            flush=True,
+        )
+        object_keys = list_audio_objects(bucket, prefix=prefix)
+
+        if not object_keys:
+            raise ValueError(
+                f"No audio files found in bucket '{bucket}' with prefix '{prefix}'."
+            )
+
+    if max_files > 0:
+        object_keys = object_keys[:max_files]
+        print(f"[Config] MAX_FILES applied. Will process first {len(object_keys)} file(s).", flush=True)
+
+    print(f"[Config] Total audio files to process: {len(object_keys)}", flush=True)
+    for idx, key in enumerate(object_keys, start=1):
+        print(f"  {idx}. {key}", flush=True)
+
+    success_count = 0
+    failed: List[Dict[str, str]] = []
+
+    for idx, key in enumerate(object_keys, start=1):
+        print(f"\n##### [{idx}/{len(object_keys)}] Start #####", flush=True)
         try:
-            os.remove(local_audio_path)
-        except Exception:
-            pass
+            result = process_single_audio(bucket=bucket, object_key=key, language=language)
+            success_count += 1
+            print(f"##### [{idx}/{len(object_keys)}] Success: {result} #####", flush=True)
+        except Exception as e:
+            failed_item = {"object_key": key, "error": str(e)}
+            failed.append(failed_item)
+            print(f"##### [{idx}/{len(object_keys)}] Failed #####", flush=True)
+            print(json.dumps(failed_item, indent=2, ensure_ascii=False), flush=True)
+
+            if fail_fast:
+                raise
+
+    print("\n" + "=" * 80, flush=True)
+    print("Batch processing finished.", flush=True)
+    print(f"Success count: {success_count}", flush=True)
+    print(f"Failure count: {len(failed)}", flush=True)
+    if failed:
+        print("Failed items:", flush=True)
+        print(json.dumps(failed, indent=2, ensure_ascii=False), flush=True)
+    print("=" * 80, flush=True)
 
 
 if __name__ == "__main__":
