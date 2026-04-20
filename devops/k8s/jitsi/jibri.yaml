@@ -51,9 +51,47 @@ metadata:
 data:
   jibri.conf: |
     jibri {
+      id = ""
+      single-use-mode = false
+      api {
+        http {
+          external-api-port = 2222
+          internal-api-port = 3333
+        }
+        xmpp {
+          environments = [
+            {
+              name = "prod environment"
+              xmpp-server-hosts = ["prosody"]
+              xmpp-domain = "meet.jitsi"
+              control-muc {
+                domain = "internal-muc.meet.jitsi"
+                room-name = "JibriBrewery"
+                nickname = "jibri-nickname"
+              }
+              control-login {
+                domain = "auth.meet.jitsi"
+                username = "jibri"
+                password = "${JIBRI_XMPP_PASSWORD}"
+              }
+              call-login {
+                domain = "recorder.meet.jitsi"
+                username = "recorder"
+                password = "${JIBRI_RECORDER_PASSWORD}"
+              }
+              strip-from-room-domain = "conference."
+              usage-timeout = 0
+              trust-all-xmpp-certs = true
+            }
+          ]
+        }
+      }
       recording {
         recordings-directory = "/config/recordings"
         finalize-script = "/config/finalize.sh"
+      }
+      streaming {
+        rtmp-allow-list = [ ".*" ]
       }
       chrome {
         flags = [
@@ -66,6 +104,19 @@ data:
           "--disable-web-security",
           "--allow-running-insecure-content"
         ]
+      }
+      stats {
+        enable-stats-d = true
+      }
+      webhook {
+        subscribers = []
+      }
+      jwt-info {
+      }
+      call-status-checks {
+        no-media-timeout = 30 seconds
+        all-muted-timeout = 10 minutes
+        default-call-empty-timeout = 30 seconds
       }
     }
 ---
@@ -115,7 +166,7 @@ spec:
         - name: dshm
           mountPath: /dev/shm
         - name: jibri-conf
-          mountPath: /etc/jitsi/jibri/jibri.conf
+          mountPath: /defaults/jibri.conf
           subPath: jibri.conf
       volumes:
       - name: dev-snd
