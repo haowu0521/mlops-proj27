@@ -20,7 +20,7 @@ data:
   summary_column: "target_summary"
 
   validation_split: 0.2
-  make_test_from_validation: true
+  make_test_from_validation: false
 
   max_train_samples: null
   max_eval_samples: null
