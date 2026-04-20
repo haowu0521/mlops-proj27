@@ -49,11 +49,10 @@ jobs:
       - name: Build and push data-api
         uses: docker/build-push-action@v5
         with:
-          context: ./data/api
+          context: ./data
+          file: ./data/api/Dockerfile
           push: true
-          tags: |
-            ${{ env.REGISTRY }}/${{ github.repository }}/data-api:latest
-            ${{ env.REGISTRY }}/${{ github.repository }}/data-api:${{ github.sha }}
+          tags: ghcr.io/haowu0521/mlops-proj27/data-api:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
