@@ -186,6 +186,24 @@ echo "[7/10] Deploying MLflow ..."
 $KUBECTL apply -f "$K8S_DIR/mlflow/mlflow.yaml"
 
 # ------------------------------------------------------------------
+# 7b. Deploy data-api (FastAPI; image pulled from GHCR)
+#
+# The init-db Job mounts data/sql via hostPath, so the repo MUST live at
+# /home/cc/mlops-proj27 on the node. If you clone elsewhere, edit the
+# hostPath in devops/k8s/data/api.yaml before running bootstrap.
+# ------------------------------------------------------------------
+echo "[7b/10] Deploying data-api ..."
+if [ ! -d "/home/cc/mlops-proj27/data/sql" ]; then
+    echo "  WARNING: /home/cc/mlops-proj27/data/sql not found on node."
+    echo "  The data-api-init-db Job will fail until the repo is cloned there,"
+    echo "  or until the hostPath in devops/k8s/data/api.yaml is updated."
+fi
+$KUBECTL apply -f "$K8S_DIR/data/api.yaml"
+echo "      Waiting for data-api-init-db Job ..."
+$KUBECTL -n platform wait --for=condition=complete --timeout=5m \
+    job/data-api-init-db || true
+
+# ------------------------------------------------------------------
 # 8. Deploy monitoring (Prometheus + Grafana)
 # ------------------------------------------------------------------
 echo "[8/10] Deploying Prometheus + Grafana ..."
@@ -241,10 +259,12 @@ for deploy in prosody jicofo jvb web jibri; do
     echo "      jitsi/$deploy: ready"
 done
 
-until $KUBECTL get deployment mlflow -n platform 2>/dev/null | grep -q "1/1"; do
-    sleep 5
+for deploy in mlflow data-api; do
+    until $KUBECTL get deployment "$deploy" -n platform 2>/dev/null | grep -q "1/1"; do
+        sleep 5
+    done
+    echo "      platform/$deploy: ready"
 done
-echo "      platform/mlflow: ready"
 
 echo ""
 echo "============================================"
@@ -255,6 +275,7 @@ $KUBECTL get pods -A -o wide
 echo ""
 echo " Jitsi         : https://$NIP_DOMAIN"
 echo " MLflow        : http://$FLOATING_IP:30500"
+echo " Data API      : http://$FLOATING_IP:30800  (Swagger UI: /docs)"
 echo " MinIO console : http://$FLOATING_IP:30901"
 echo " Grafana       : http://$FLOATING_IP:30300 (admin / admin123)"
 echo " Prometheus    : http://$FLOATING_IP:30090"
