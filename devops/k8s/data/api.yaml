@@ -1,0 +1,132 @@
+# ---------------------------------------------------------------------------
+# api.yaml — Data platform FastAPI service
+#
+# Image is built by GitHub Actions and pushed to GHCR as
+# ghcr.io/haowu0521/mlops-proj27/data-api:latest (public package).
+# To deploy a new version: push new image, then
+#   sudo kubectl rollout restart deployment/data-api -n platform
+# ---------------------------------------------------------------------------
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: data-api-config
+  namespace: platform
+data:
+  DB_HOST: "postgres-postgresql.platform.svc.cluster.local"
+  DB_PORT: "5432"
+  DB_NAME: "postgres"
+  DB_USER: "postgres"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: data-api
+  namespace: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: data-api
+  template:
+    metadata:
+      labels:
+        app: data-api
+    spec:
+      containers:
+      - name: api
+        image: ghcr.io/haowu0521/mlops-proj27/data-api:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        envFrom:
+        - configMapRef:
+            name: data-api-config
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-postgresql
+              key: postgres-password
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: data-api
+  namespace: platform
+spec:
+  selector:
+    app: data-api
+  type: NodePort
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    nodePort: 30800
+---
+# One-shot Job: create tables + run migrations
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: data-api-init-db
+  namespace: platform
+spec:
+  ttlSecondsAfterFinished: 600
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+      - name: initdb
+        image: postgres:15-alpine
+        command: ["sh", "-c"]
+        args:
+          - |
+            set -eu
+            echo "[initdb] waiting for postgres..."
+            until PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -c 'SELECT 1' >/dev/null 2>&1; do
+              sleep 2
+            done
+            echo "[initdb] applying schema.sql..."
+            PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f /sql/schema.sql
+            echo "[initdb] applying migrations..."
+            for f in /sql/migrations/*.sql; do
+              echo "  applying $f"
+              PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -U "$DB_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$f"
+            done
+            echo "[initdb] done."
+        envFrom:
+        - configMapRef:
+            name: data-api-config
+        env:
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: postgres-postgresql
+              key: postgres-password
+        volumeMounts:
+        - name: sql
+          mountPath: /sql
+          readOnly: true
+      volumes:
+      - name: sql
+        hostPath:
+          path: /home/cc/mlops-proj27/data/sql
+          type: Directory
