@@ -150,5 +150,6 @@ spec:
           mc mb --ignore-existing local/jitsi-data
           mc mb --ignore-existing local/recordings
           mc mb --ignore-existing local/mlflow-artifacts
+          mc mb --ignore-existing local/audio-files
           echo "buckets ready:"
           mc ls local
