@@ -14,6 +14,7 @@ import pandas as pd
 import torch
 import yaml
 from datasets import DatasetDict, load_dataset
+from mlflow.tracking import MlflowClient
 from transformers import (
     AutoModelForSeq2SeqLM,
     AutoTokenizer,
@@ -22,6 +23,20 @@ from transformers import (
     Seq2SeqTrainingArguments,
     pipeline,
 )
+
+
+# ----------------------------
+# Shared platform defaults
+# ----------------------------
+DEFAULT_MLFLOW_TRACKING_URI = "http://129.114.26.182:30500"
+DEFAULT_MLFLOW_S3_ENDPOINT_URL = "http://129.114.26.182:30900"
+DEFAULT_AWS_ACCESS_KEY_ID = "minio"
+DEFAULT_AWS_SECRET_ACCESS_KEY = "minio123"
+
+os.environ.setdefault("MLFLOW_TRACKING_URI", DEFAULT_MLFLOW_TRACKING_URI)
+os.environ.setdefault("MLFLOW_S3_ENDPOINT_URL", DEFAULT_MLFLOW_S3_ENDPOINT_URL)
+os.environ.setdefault("AWS_ACCESS_KEY_ID", DEFAULT_AWS_ACCESS_KEY_ID)
+os.environ.setdefault("AWS_SECRET_ACCESS_KEY", DEFAULT_AWS_SECRET_ACCESS_KEY)
 
 
 def load_config(config_path: str) -> Dict[str, Any]:
@@ -227,11 +242,13 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
+        device = 0 if torch.cuda.is_available() else -1
+
         self.pipe = pipeline(
-            "summarization",
+            "text2text-generation",
             model=self.model,
             tokenizer=self.tokenizer,
-            device=-1,
+            device=device,
         )
 
     def predict(self, context, model_input: pd.DataFrame) -> pd.DataFrame:
@@ -245,14 +262,24 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         else:
             texts = [str(model_input)]
 
-        outputs = self.pipe(texts, truncation=True, max_new_tokens=128)
+        outputs = self.pipe(
+            texts,
+            truncation=True,
+            max_new_tokens=128,
+        )
 
         summaries = []
         for out in outputs:
             if isinstance(out, list):
                 out = out[0]
-            if isinstance(out, dict) and "summary_text" in out:
-                summaries.append(out["summary_text"])
+
+            if isinstance(out, dict):
+                if "generated_text" in out:
+                    summaries.append(out["generated_text"])
+                elif "summary_text" in out:
+                    summaries.append(out["summary_text"])
+                else:
+                    summaries.append(str(out))
             else:
                 summaries.append(str(out))
 
@@ -265,9 +292,15 @@ def log_and_optionally_register_model(
     cfg: Dict[str, Any],
     eval_metrics: Dict[str, Any],
 ):
+    mlflow_cfg = cfg.get("mlflow", {})
+
     registered_model_name = (
-        cfg.get("mlflow", {}).get("registered_model_name")
+        mlflow_cfg.get("registered_model_name")
         or os.environ.get("MLFLOW_REGISTERED_MODEL_NAME")
+    )
+    registered_model_alias = (
+        mlflow_cfg.get("registered_model_alias")
+        or os.environ.get("MLFLOW_REGISTERED_MODEL_ALIAS", "production")
     )
 
     quality_gate_metric = cfg["train"].get("quality_gate_metric", "eval_rougeL")
@@ -317,6 +350,17 @@ def log_and_optionally_register_model(
             model_uri=model_uri,
             name=registered_model_name,
         )
+
+        client = MlflowClient()
+        try:
+            client.set_registered_model_alias(
+                name=registered_model_name,
+                alias=registered_model_alias,
+                version=registration.version,
+            )
+        except Exception as e:
+            print(f"Warning: failed to set alias '{registered_model_alias}': {e}")
+
         return model_uri, registered_model_name, registration, passed_gate
 
     return model_uri, None, None, passed_gate
@@ -327,7 +371,11 @@ def train(cfg: Dict[str, Any]) -> None:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
-    tracking_uri = cfg["mlflow"].get("tracking_uri") or os.environ.get("MLFLOW_TRACKING_URI")
+    tracking_uri = (
+        cfg["mlflow"].get("tracking_uri")
+        or os.environ.get("MLFLOW_TRACKING_URI")
+        or DEFAULT_MLFLOW_TRACKING_URI
+    )
     experiment_name = cfg["mlflow"].get("experiment_name", "jitsi-summarization")
     run_name = cfg["mlflow"].get(
         "run_name",
@@ -336,6 +384,10 @@ def train(cfg: Dict[str, Any]) -> None:
 
     if tracking_uri:
         mlflow.set_tracking_uri(tracking_uri)
+        try:
+            mlflow.set_registry_uri(tracking_uri)
+        except Exception:
+            pass
         mlflow.set_experiment(experiment_name)
 
     device_info = get_device_info()
@@ -490,10 +542,9 @@ def train(cfg: Dict[str, Any]) -> None:
             json.dump(cfg, f, indent=2)
 
         mlflow.log_artifact(str(config_dump_path))
-
         mlflow.log_artifacts(output_dir, artifact_path="hf_model_files")
 
-        model_uri, registered_model_name, _, passed_gate = log_and_optionally_register_model(
+        model_uri, registered_model_name, registration, passed_gate = log_and_optionally_register_model(
             output_dir=output_dir,
             run_id=run_id,
             cfg=cfg,
@@ -508,6 +559,8 @@ def train(cfg: Dict[str, Any]) -> None:
 
         if registered_model_name:
             print(f"Registered model name: {registered_model_name}")
+            if registration is not None:
+                print(f"Registered model version: {registration.version}")
         else:
             print("Model was NOT registered because it did not pass the quality gate.")
 
