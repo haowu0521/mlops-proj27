@@ -25,9 +25,6 @@ from transformers import (
 )
 
 
-# ----------------------------
-# Shared platform defaults
-# ----------------------------
 DEFAULT_MLFLOW_TRACKING_URI = "http://129.114.26.182:30500"
 DEFAULT_MLFLOW_S3_ENDPOINT_URL = "http://129.114.26.182:30900"
 DEFAULT_AWS_ACCESS_KEY_ID = "minio"
@@ -75,6 +72,15 @@ def ensure_output_dir(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
+def _resolve_existing_path(path_str: Optional[str]) -> Optional[str]:
+    if not path_str:
+        return None
+    p = Path(path_str).expanduser()
+    if p.exists():
+        return str(p)
+    return None
+
+
 def load_meeting_dataset(data_cfg: Dict[str, Any]) -> DatasetDict:
     dataset_name = data_cfg.get("dataset_name")
     dataset_config = data_cfg.get("dataset_config")
@@ -84,12 +90,35 @@ def load_meeting_dataset(data_cfg: Dict[str, Any]) -> DatasetDict:
     if dataset_name:
         ds = load_dataset(dataset_name, dataset_config)
     else:
-        train_path = data_cfg.get("train_file")
-        validation_path = data_cfg.get("validation_file")
-        test_path = data_cfg.get("test_file")
+        train_path = _resolve_existing_path(data_cfg.get("train_file"))
+        validation_path = _resolve_existing_path(data_cfg.get("validation_file"))
+        test_path = _resolve_existing_path(data_cfg.get("test_file"))
 
-        if not train_path:
+        raw_train_path = data_cfg.get("train_file")
+        raw_validation_path = data_cfg.get("validation_file")
+        raw_test_path = data_cfg.get("test_file")
+
+        if not raw_train_path:
             raise ValueError("No train_file provided in config.yaml")
+
+        if train_path is None:
+            raise FileNotFoundError(
+                f"Train file not found: {raw_train_path}\n"
+                f"Current working directory: {Path.cwd()}\n"
+                f"Please fix data.train_file in config.yaml or create the file first."
+            )
+
+        if raw_validation_path and validation_path is None:
+            raise FileNotFoundError(
+                f"Validation file not found: {raw_validation_path}\n"
+                f"Please fix data.validation_file in config.yaml or remove it."
+            )
+
+        if raw_test_path and test_path is None:
+            raise FileNotFoundError(
+                f"Test file not found: {raw_test_path}\n"
+                f"Please fix data.test_file in config.yaml or remove it."
+            )
 
         data_files = {"train": train_path}
         if validation_path:
@@ -262,17 +291,12 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         else:
             texts = [str(model_input)]
 
-        outputs = self.pipe(
-            texts,
-            truncation=True,
-            max_new_tokens=128,
-        )
+        outputs = self.pipe(texts, truncation=True, max_new_tokens=128)
 
         summaries = []
         for out in outputs:
             if isinstance(out, list):
                 out = out[0]
-
             if isinstance(out, dict):
                 if "generated_text" in out:
                     summaries.append(out["generated_text"])
