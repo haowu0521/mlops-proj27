@@ -291,12 +291,17 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         else:
             texts = [str(model_input)]
 
-        outputs = self.pipe(texts, truncation=True, max_new_tokens=128)
+        outputs = self.pipe(
+            texts,
+            truncation=True,
+            max_new_tokens=128,
+        )
 
         summaries = []
         for out in outputs:
             if isinstance(out, list):
                 out = out[0]
+
             if isinstance(out, dict):
                 if "generated_text" in out:
                     summaries.append(out["generated_text"])
