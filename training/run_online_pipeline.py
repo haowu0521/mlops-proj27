@@ -6,16 +6,33 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import boto3
+import mlflow
 import mlflow.pyfunc
 import pandas as pd
 import requests
 
 
+# ----------------------------
+# Shared platform defaults
+# ----------------------------
 DATA_API_BASE = os.environ.get("DATA_API_BASE", "http://129.114.26.182:30800")
+
+MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.26.182:30500")
+MLFLOW_S3_ENDPOINT_URL = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://129.114.26.182:30900")
+
 MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://129.114.26.182:30900")
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "minio")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "minio123")
 
+# Make sure MLflow registry/artifact resolution uses the shared platform
+os.environ["MLFLOW_TRACKING_URI"] = MLFLOW_TRACKING_URI
+os.environ["MLFLOW_S3_ENDPOINT_URL"] = MLFLOW_S3_ENDPOINT_URL
+os.environ["AWS_ACCESS_KEY_ID"] = AWS_ACCESS_KEY_ID
+os.environ["AWS_SECRET_ACCESS_KEY"] = AWS_SECRET_ACCESS_KEY
+
+mlflow.set_tracking_uri(MLFLOW_TRACKING_URI)
+
+# Registry model names from your shared MLflow UI
 ASR_MODEL_URI = os.environ.get("ASR_MODEL_URI", "models:/jitsi-asr/1")
 SUMMARIZATION_MODEL_URI = os.environ.get("SUMMARIZATION_MODEL_URI", "models:/jitsi-summarizer/6")
 SUMMARIZATION_MODEL_VERSION = os.environ.get("SUMMARIZATION_MODEL_VERSION", "jitsi-summarizer/6")
@@ -90,6 +107,8 @@ def upload_text_to_minio(bucket: str, object_key: str, text: str) -> None:
 def get_asr_model():
     global _ASR_MODEL
     if _ASR_MODEL is None:
+        print(f"[MLflow] tracking_uri={mlflow.get_tracking_uri()}", flush=True)
+        print(f"[MLflow] MLFLOW_S3_ENDPOINT_URL={os.environ.get('MLFLOW_S3_ENDPOINT_URL')}", flush=True)
         print(f"[Model] Loading ASR model from {ASR_MODEL_URI}", flush=True)
         _ASR_MODEL = mlflow.pyfunc.load_model(ASR_MODEL_URI)
         print("[Model] ASR model loaded", flush=True)
@@ -99,6 +118,8 @@ def get_asr_model():
 def get_summarization_model():
     global _SUMMARIZATION_MODEL
     if _SUMMARIZATION_MODEL is None:
+        print(f"[MLflow] tracking_uri={mlflow.get_tracking_uri()}", flush=True)
+        print(f"[MLflow] MLFLOW_S3_ENDPOINT_URL={os.environ.get('MLFLOW_S3_ENDPOINT_URL')}", flush=True)
         print(f"[Model] Loading summarization model from {SUMMARIZATION_MODEL_URI}", flush=True)
         _SUMMARIZATION_MODEL = mlflow.pyfunc.load_model(SUMMARIZATION_MODEL_URI)
         print("[Model] Summarization model loaded", flush=True)
@@ -404,6 +425,13 @@ def main():
 
     if not bucket:
         raise ValueError("MINIO_BUCKET is required.")
+
+    print(f"[Config] DATA_API_BASE={DATA_API_BASE}", flush=True)
+    print(f"[Config] MLFLOW_TRACKING_URI={MLFLOW_TRACKING_URI}", flush=True)
+    print(f"[Config] MLFLOW_S3_ENDPOINT_URL={MLFLOW_S3_ENDPOINT_URL}", flush=True)
+    print(f"[Config] MINIO_ENDPOINT={MINIO_ENDPOINT}", flush=True)
+    print(f"[Config] ASR_MODEL_URI={ASR_MODEL_URI}", flush=True)
+    print(f"[Config] SUMMARIZATION_MODEL_URI={SUMMARIZATION_MODEL_URI}", flush=True)
 
     if object_key:
         object_keys = [object_key]
