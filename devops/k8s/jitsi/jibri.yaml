@@ -58,21 +58,6 @@ spec:
       labels:
         app: jibri
     spec:
-      initContainers:
-      - name: patch-jibri-conf
-        image: jitsi/jibri:stable
-        command:
-        - sh
-        - -c
-        - |
-          set -eu
-          cp /defaults/jibri.conf /patched/jibri.conf
-          sed -i 's|"--autoplay-policy=no-user-gesture-required"|"--autoplay-policy=no-user-gesture-required",\n        "--ignore-certificate-errors",\n        "--disable-web-security",\n        "--allow-running-insecure-content"|' /patched/jibri.conf
-          echo "---- patched jibri.conf chrome section ----"
-          grep -A 12 "chrome" /patched/jibri.conf
-        volumeMounts:
-        - name: patched-defaults
-          mountPath: /patched
       containers:
       - name: jibri
         image: jitsi/jibri:stable
@@ -86,6 +71,8 @@ spec:
         env:
         - name: DISPLAY
           value: ":0"
+        - name: IGNORE_CERTIFICATE_ERRORS
+          value: "1"
         resources:
           requests:
             cpu: "500m"
@@ -103,9 +90,6 @@ spec:
           subPath: finalize.sh
         - name: dshm
           mountPath: /dev/shm
-        - name: patched-defaults
-          mountPath: /defaults/jibri.conf
-          subPath: jibri.conf
       volumes:
       - name: dev-snd
         hostPath:
@@ -120,5 +104,3 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 2Gi
-      - name: patched-defaults
-        emptyDir: {}
