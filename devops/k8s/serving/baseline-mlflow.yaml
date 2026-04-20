@@ -20,6 +20,14 @@ metadata:
   namespace: platform
 spec:
   replicas: 1
+  # Recreate (not RollingUpdate): this pod loads a ~500MB BART model into
+  # ~1.5-2GB of RAM during startup. Default RollingUpdate keeps the old pod
+  # alive while bringing up the new one, so during `rollout restart` we'd
+  # briefly have 2 pods × 2GB = 4GB of extra pressure — which was enough
+  # to OOM the whole VM (including sshd) on the 8GB node. Recreate kills
+  # the old pod first so peak memory stays flat.
+  strategy:
+    type: Recreate
   selector:
     matchLabels:
       app: serving-baseline-mlflow
