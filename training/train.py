@@ -566,14 +566,14 @@ def train(cfg: Dict[str, Any]) -> None:
        
 
         trainer = Seq2SeqTrainer(
-            model=model,
-            args=training_args,
-            train_dataset=tokenized_ds["train"],
-            eval_dataset=tokenized_ds["validation"],
-            tokenizer=tokenizer,
-            data_collator=data_collator,
-            compute_metrics=compute_metrics_builder(tokenizer),
-        )
+    model=model,
+    args=training_args,
+    train_dataset=tokenized_ds["train"],
+    eval_dataset=tokenized_ds["validation"],
+    processing_class=tokenizer,
+    data_collator=data_collator,
+    compute_metrics=compute_metrics_builder(tokenizer),
+)
 
         start_time = time.time()
 
