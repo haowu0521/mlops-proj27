@@ -81,11 +81,40 @@ def _resolve_existing_path(path_str: Optional[str]) -> Optional[str]:
     return None
 
 
+def _safe_train_validation_split(ds, validation_split: float, seed: int):
+    n = len(ds)
+    if n == 0:
+        raise ValueError("Training dataset is empty.")
+    if n == 1:
+        print("[WARN] Only 1 training example found. Reusing it for validation.")
+        return DatasetDict({"train": ds, "validation": ds})
+
+    val_count = max(1, int(round(n * validation_split)))
+    val_count = min(val_count, n - 1)
+
+    split = ds.train_test_split(test_size=val_count, seed=seed)
+    return DatasetDict({"train": split["train"], "validation": split["test"]})
+
+
+def _safe_validation_test_split(validation_ds, seed: int):
+    n = len(validation_ds)
+    if n < 2:
+        print("[WARN] Validation set too small to create test split. Skipping test split.")
+        return None
+
+    test_count = max(1, int(round(n * 0.5)))
+    test_count = min(test_count, n - 1)
+
+    return validation_ds.train_test_split(test_size=test_count, seed=seed)
+
+
 def load_meeting_dataset(data_cfg: Dict[str, Any]) -> DatasetDict:
     dataset_name = data_cfg.get("dataset_name")
     dataset_config = data_cfg.get("dataset_config")
     text_column = data_cfg.get("text_column", "transcript")
     summary_column = data_cfg.get("summary_column", "summary")
+    seed = data_cfg.get("seed", 42)
+    validation_split = float(data_cfg.get("validation_split", 0.1))
 
     if dataset_name:
         ds = load_dataset(dataset_name, dataset_config)
@@ -134,25 +163,16 @@ def load_meeting_dataset(data_cfg: Dict[str, Any]) -> DatasetDict:
         ds = load_dataset(loader_name, data_files=data_files)
 
     if "validation" not in ds:
-        split = ds["train"].train_test_split(
-            test_size=data_cfg.get("validation_split", 0.1),
-            seed=data_cfg.get("seed", 42),
-        )
-        ds = DatasetDict({
-            "train": split["train"],
-            "validation": split["test"],
-        })
+        ds = _safe_train_validation_split(ds["train"], validation_split, seed)
 
     if "test" not in ds and data_cfg.get("make_test_from_validation", False):
-        split = ds["validation"].train_test_split(
-            test_size=0.5,
-            seed=data_cfg.get("seed", 42),
-        )
-        ds = DatasetDict({
-            "train": ds["train"],
-            "validation": split["train"],
-            "test": split["test"],
-        })
+        split = _safe_validation_test_split(ds["validation"], seed)
+        if split is not None:
+            ds = DatasetDict({
+                "train": ds["train"],
+                "validation": split["train"],
+                "test": split["test"],
+            })
 
     required_columns = {text_column, summary_column}
     for split_name in ds.keys():
@@ -222,12 +242,6 @@ def build_preprocess_fn(tokenizer, cfg: Dict[str, Any]):
     return preprocess_fn
 
 
-def postprocess_text(preds, labels):
-    preds = [p.strip() for p in preds]
-    labels = [l.strip() for l in labels]
-    return preds, labels
-
-
 def compute_metrics_builder(tokenizer):
     rouge = evaluate.load("rouge")
 
@@ -237,23 +251,52 @@ def compute_metrics_builder(tokenizer):
         if isinstance(preds, tuple):
             preds = preds[0]
 
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        preds = np.asarray(preds)
+        labels = np.asarray(labels)
 
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        if preds.ndim == 3:
+            preds = np.argmax(preds, axis=-1)
 
-        decoded_preds, decoded_labels = postprocess_text(decoded_preds, decoded_labels)
+        pad_id = tokenizer.pad_token_id
+        if pad_id is None:
+            pad_id = tokenizer.eos_token_id if tokenizer.eos_token_id is not None else 0
+
+        vocab_size = getattr(tokenizer, "vocab_size", None)
+
+        preds = preds.astype(np.int64, copy=False)
+        labels = labels.astype(np.int64, copy=False)
+
+        preds = np.where(preds < 0, pad_id, preds)
+        if vocab_size is not None:
+            preds = np.where(preds >= vocab_size, pad_id, preds)
+
+        labels = np.where(labels == -100, pad_id, labels)
+        labels = np.where(labels < 0, pad_id, labels)
+        if vocab_size is not None:
+            labels = np.where(labels >= vocab_size, pad_id, labels)
+
+        decoded_preds = tokenizer.batch_decode(
+            preds.tolist(),
+            skip_special_tokens=True,
+        )
+        decoded_labels = tokenizer.batch_decode(
+            labels.tolist(),
+            skip_special_tokens=True,
+        )
+
+        decoded_preds = [p.strip() for p in decoded_preds]
+        decoded_labels = [l.strip() for l in decoded_labels]
 
         result = rouge.compute(
             predictions=decoded_preds,
             references=decoded_labels,
             use_stemmer=True,
         )
-
         result = {k: round(v * 100, 4) for k, v in result.items()}
 
         prediction_lens = [
-            np.count_nonzero(pred != tokenizer.pad_token_id) for pred in preds
+            int(np.count_nonzero(np.array(pred_row) != pad_id))
+            for pred_row in preds
         ]
         result["gen_len"] = round(float(np.mean(prediction_lens)), 4)
 
@@ -337,7 +380,11 @@ def log_and_optionally_register_model(
 
     metric_value = eval_metrics.get(quality_gate_metric)
     metric_value = float(metric_value) if metric_value is not None else None
-    passed_gate = metric_value is not None and metric_value >= quality_gate_threshold
+
+    if quality_gate_threshold <= 0 and metric_value is None:
+        passed_gate = True
+    else:
+        passed_gate = metric_value is not None and metric_value >= quality_gate_threshold
 
     mlflow.log_param("quality_gate_metric", quality_gate_metric)
     mlflow.log_param("quality_gate_threshold", quality_gate_threshold)
@@ -367,6 +414,7 @@ def log_and_optionally_register_model(
                 "torch",
                 "sentencepiece",
                 "pandas",
+                "numpy",
             ],
         )
 
@@ -494,7 +542,7 @@ def train(cfg: Dict[str, Any]) -> None:
             output_dir=output_dir,
             do_train=True,
             do_eval=True,
-            eval_strategy=cfg["train"].get("eval_strategy", "epoch"),
+            evaluation_strategy=cfg["train"].get("eval_strategy", "epoch"),
             save_strategy=cfg["train"].get("save_strategy", "epoch"),
             logging_strategy=cfg["train"].get("logging_strategy", "steps"),
             logging_steps=cfg["train"].get("logging_steps", 10),
@@ -504,6 +552,8 @@ def train(cfg: Dict[str, Any]) -> None:
             weight_decay=cfg["train"].get("weight_decay", 0.0),
             num_train_epochs=cfg["train"]["num_train_epochs"],
             predict_with_generate=True,
+            generation_max_length=cfg["model"].get("max_target_length", 128),
+            generation_num_beams=cfg["train"].get("generation_num_beams", 4),
             fp16=cfg["train"].get("fp16", False) and torch.cuda.is_available(),
             gradient_accumulation_steps=cfg["train"].get("gradient_accumulation_steps", 1),
             warmup_ratio=cfg["train"].get("warmup_ratio", 0.0),
@@ -519,7 +569,7 @@ def train(cfg: Dict[str, Any]) -> None:
             args=training_args,
             train_dataset=tokenized_ds["train"],
             eval_dataset=tokenized_ds["validation"],
-            processing_class=tokenizer,
+            tokenizer=tokenizer,
             data_collator=data_collator,
             compute_metrics=compute_metrics_builder(tokenizer),
         )
