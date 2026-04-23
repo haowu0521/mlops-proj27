@@ -20,7 +20,7 @@ DATA_API_BASE = os.environ.get("DATA_API_BASE", "http://129.114.27.10:30800")
 MLFLOW_TRACKING_URI = os.environ.get("MLFLOW_TRACKING_URI", "http://129.114.27.10:30500")
 MLFLOW_S3_ENDPOINT_URL = os.environ.get("MLFLOW_S3_ENDPOINT_URL", "http://129.114.27.10:30900")
 
-MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://129.114.26.182:30900")
+MINIO_ENDPOINT = os.environ.get("MINIO_ENDPOINT", "http://129.114.27.10:30900")
 AWS_ACCESS_KEY_ID = os.environ.get("AWS_ACCESS_KEY_ID", "minio")
 AWS_SECRET_ACCESS_KEY = os.environ.get("AWS_SECRET_ACCESS_KEY", "minio123")
 
