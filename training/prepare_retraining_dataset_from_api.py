@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import requests
 
 
-DATA_API_BASE = os.environ.get("DATA_API_BASE", "http://129.114.26.182:30800")
+DATA_API_BASE = os.environ.get("DATA_API_BASE", "http://129.114.27.10:30800")
 
 MEETING_MANIFEST_PATH = Path(
     os.environ.get("MEETING_MANIFEST_PATH", "data/meeting_manifest.jsonl")
