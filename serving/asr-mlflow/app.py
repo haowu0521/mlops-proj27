@@ -134,14 +134,12 @@ class PredictResponse(BaseModel):
 
 class ProcessMeetingRequest(BaseModel):
     meeting_id: str
-    asr_job_id: Optional[str] = None
     audio_object_key: Optional[str] = None
     audio_bucket: str = DEFAULT_BUCKET
     language: Optional[str] = None
 
 
 class ProcessMeetingResponse(PredictResponse):
-    asr_job_id: Optional[str] = None
     transcript_id: str
     transcript_object_key: str
 
@@ -263,7 +261,6 @@ def _process_meeting(req: ProcessMeetingRequest) -> ProcessMeetingResponse:
             req.meeting_id,
             "processing",
             status="in_progress",
-            asr_job_id=req.asr_job_id,
         )
         result = _run_asr(PredictRequest(
             meeting_id=req.meeting_id,
@@ -277,10 +274,9 @@ def _process_meeting(req: ProcessMeetingRequest) -> ProcessMeetingResponse:
             result.transcript,
             transcript_object_key,
         )
-        _set_asr_status(req.meeting_id, "completed", asr_job_id=req.asr_job_id)
+        _set_asr_status(req.meeting_id, "completed")
         return ProcessMeetingResponse(
             **result.model_dump(),
-            asr_job_id=req.asr_job_id,
             transcript_id=transcript_id,
             transcript_object_key=transcript_object_key,
         )
@@ -291,7 +287,6 @@ def _process_meeting(req: ProcessMeetingRequest) -> ProcessMeetingResponse:
                 req.meeting_id,
                 "failed",
                 status="failed",
-                asr_job_id=req.asr_job_id,
                 asr_last_error=str(e)[:500],
             )
         except Exception as status_err:
@@ -321,4 +316,3 @@ def process_meeting(req: ProcessMeetingRequest):
         return _process_meeting(req)
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
-

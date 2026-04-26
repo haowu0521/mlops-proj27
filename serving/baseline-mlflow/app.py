@@ -27,15 +27,17 @@
 #   AWS_SECRET_ACCESS_KEY   - MinIO secret key
 #   MODEL_NAME              - registered model name (default: jitsi-summarizer)
 #   MODEL_ALIAS             - registry alias (default: production)
+#   DATA_API_URL            - internal data-api URL for /process-meeting
 # ---------------------------------------------------------------------------
 
 import logging
 import os
 import re
-from typing import List, Tuple
+from typing import Any, List, Tuple
 
 import mlflow.pyfunc
 import pandas as pd
+import requests
 from fastapi import FastAPI, HTTPException
 from mlflow.tracking import MlflowClient
 from pydantic import BaseModel
@@ -46,6 +48,11 @@ log = logging.getLogger("serving")
 MODEL_NAME = os.environ.get("MODEL_NAME", "jitsi-summarizer")
 MODEL_ALIAS = os.environ.get("MODEL_ALIAS", "production")
 MODEL_URI = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"
+DATA_API_URL = os.environ.get(
+    "DATA_API_URL",
+    "http://data-api.platform.svc.cluster.local:8000",
+).rstrip("/")
+DATA_API_TIMEOUT_SECONDS = float(os.environ.get("DATA_API_TIMEOUT_SECONDS", "30"))
 
 app = FastAPI(title="jitsi-summarizer (MLflow-backed)")
 
@@ -87,6 +94,15 @@ class PredictResponse(BaseModel):
     model_alias: str = MODEL_ALIAS
 
 
+class ProcessMeetingRequest(BaseModel):
+    meeting_id: str
+
+
+class ProcessMeetingResponse(PredictResponse):
+    summary_id: str
+    action_item_id: str
+
+
 def _generate(text: str) -> str:
     """Call the pyfunc. Training-side predict() expects a DataFrame with a
     'text' column and returns a DataFrame with a 'summary' column
@@ -108,6 +124,53 @@ def _split_action_items(generated: str) -> Tuple[str, List[str]]:
     return summary, items
 
 
+def _data_api(method: str, path: str, **kwargs: Any) -> requests.Response:
+    resp = requests.request(
+        method,
+        f"{DATA_API_URL}{path}",
+        timeout=DATA_API_TIMEOUT_SECONDS,
+        **kwargs,
+    )
+    resp.raise_for_status()
+    return resp
+
+
+def _summarize(meeting_id: str, transcript: str) -> PredictResponse:
+    generated = _generate(transcript)
+    summary, action_items = _split_action_items(generated)
+    return PredictResponse(
+        meeting_id=meeting_id,
+        summary=summary,
+        action_items=action_items,
+    )
+
+
+def _process_meeting(meeting_id: str) -> ProcessMeetingResponse:
+    transcript_resp = _data_api("GET", f"/transcripts/by_meeting/{meeting_id}")
+    transcript = transcript_resp.json().get("transcript_text")
+    if not transcript:
+        raise RuntimeError(f"meeting {meeting_id} has no transcript_text")
+
+    prediction = _summarize(meeting_id, transcript)
+    summary_resp = _data_api(
+        "POST",
+        "/summaries",
+        json={
+            "meeting_id": meeting_id,
+            "model_version": f"{MODEL_NAME}@{MODEL_ALIAS}",
+            "summary_text": prediction.summary,
+            "action_item_text": "\n".join(prediction.action_items),
+        },
+    )
+    ids = summary_resp.json()
+
+    return ProcessMeetingResponse(
+        **prediction.model_dump(),
+        summary_id=str(ids["summary_id"]),
+        action_item_id=str(ids["action_item_id"]),
+    )
+
+
 @app.get("/health")
 def health():
     return {"status": "ok", "model": MODEL_URI}
@@ -116,13 +179,17 @@ def health():
 @app.post("/predict", response_model=PredictResponse)
 def predict(req: PredictRequest):
     try:
-        generated = _generate(req.transcript)
-        summary, action_items = _split_action_items(generated)
-        return PredictResponse(
-            meeting_id=req.meeting_id,
-            summary=summary,
-            action_items=action_items,
-        )
+        return _summarize(req.meeting_id, req.transcript)
     except Exception as e:
         log.exception("predict failed")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/process-meeting", response_model=ProcessMeetingResponse)
+def process_meeting(req: ProcessMeetingRequest):
+    """Fetch the latest transcript for a meeting, summarize it, and persist the result."""
+    try:
+        return _process_meeting(req.meeting_id)
+    except Exception as e:
+        log.exception("process meeting failed")
         raise HTTPException(status_code=500, detail=str(e))

@@ -61,6 +61,8 @@ spec:
           value: "jitsi-summarizer"
         - name: MODEL_ALIAS
           value: "production"
+        - name: DATA_API_URL
+          value: "http://data-api.platform.svc.cluster.local:8000"
         # BART base is ~500MB, plus tokenizer + torch runtime; give it room.
         resources:
           requests:
