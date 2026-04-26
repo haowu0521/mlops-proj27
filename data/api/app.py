@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from typing import Optional
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -32,6 +32,10 @@ class AsrStatus(str, Enum):
 
 
 app = FastAPI()
+
+
+def _str_or_none(value):
+    return str(value) if value is not None else None
 
 
 class MeetingCreate(BaseModel):
@@ -97,6 +101,122 @@ def create_meeting(payload: MeetingCreate):
             ),
         )
     return {"meeting_id": meeting_id}
+
+
+@app.get("/meetings")
+def list_meetings(
+    limit: int = Query(default=25, ge=1, le=200),
+    source_prefix: Optional[str] = None,
+):
+    source_like = f"{source_prefix}%" if source_prefix else None
+    with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            SELECT
+                m.meeting_id,
+                m.source,
+                m.started_at,
+                m.ended_at,
+                m.audio_object_key,
+                m.audio_checksum,
+                m.audio_duration_seconds,
+                m.status,
+                m.asr_status,
+                m.asr_job_id,
+                m.asr_last_error,
+                m.asr_requested_at,
+                m.asr_completed_at,
+                m.created_at,
+                t.transcript_id,
+                t.transcript_text,
+                t.transcript_object_key,
+                t.created_at AS transcript_created_at,
+                s.summary_id,
+                s.model_version,
+                s.summary_text,
+                s.created_at AS summary_created_at,
+                a.action_item_id,
+                a.item_text,
+                a.created_at AS action_item_created_at,
+                r.review_id,
+                r.rating,
+                r.approved,
+                r.edited_summary,
+                r.edited_action_items,
+                r.created_at AS review_created_at
+            FROM meetings m
+            LEFT JOIN LATERAL (
+                SELECT transcript_id, transcript_text, transcript_object_key, created_at
+                FROM transcripts
+                WHERE meeting_id = m.meeting_id
+                ORDER BY created_at DESC, transcript_id DESC
+                LIMIT 1
+            ) t ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT summary_id, model_version, summary_text, created_at
+                FROM summaries
+                WHERE meeting_id = m.meeting_id
+                ORDER BY created_at DESC, summary_id DESC
+                LIMIT 1
+            ) s ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT action_item_id, item_text, created_at
+                FROM action_items
+                WHERE meeting_id = m.meeting_id
+                ORDER BY created_at DESC, action_item_id DESC
+                LIMIT 1
+            ) a ON TRUE
+            LEFT JOIN LATERAL (
+                SELECT review_id, rating, approved, edited_summary, edited_action_items, created_at
+                FROM reviews
+                WHERE meeting_id = m.meeting_id
+                ORDER BY created_at DESC, review_id DESC
+                LIMIT 1
+            ) r ON TRUE
+            WHERE (%s::text IS NULL OR m.source LIKE %s::text)
+            ORDER BY m.created_at DESC
+            LIMIT %s
+            """,
+            (source_like, source_like, limit),
+        )
+        rows = cur.fetchall()
+
+    return [
+        {
+            "meeting_id": str(row[0]),
+            "source": row[1],
+            "started_at": row[2],
+            "ended_at": row[3],
+            "audio_object_key": row[4],
+            "audio_checksum": row[5],
+            "audio_duration_seconds": row[6],
+            "status": row[7],
+            "asr_status": row[8],
+            "asr_job_id": row[9],
+            "asr_last_error": row[10],
+            "asr_requested_at": row[11],
+            "asr_completed_at": row[12],
+            "created_at": row[13],
+            "transcript_id": _str_or_none(row[14]),
+            "transcript_text": row[15],
+            "transcript_object_key": row[16],
+            "transcript_created_at": row[17],
+            "summary_id": _str_or_none(row[18]),
+            "model_version": row[19],
+            "summary_text": row[20],
+            "summary_created_at": row[21],
+            "action_item_id": _str_or_none(row[22]),
+            "action_item_text": row[23],
+            "action_item_created_at": row[24],
+            "review_id": _str_or_none(row[25]),
+            "rating": row[26],
+            "approved": row[27],
+            "edited_summary": row[28],
+            "edited_action_items": row[29],
+            "review_created_at": row[30],
+        }
+        for row in rows
+    ]
 
 
 @app.get("/meetings/{meeting_id}")
@@ -504,10 +624,13 @@ def create_review(payload: ReviewCreate):
             row = cur.fetchone()
             edited_action_items = row[0] if row else None
 
-    if not edited_summary or not edited_action_items:
+    if edited_action_items is None:
+        edited_action_items = ""
+
+    if not edited_summary:
         raise HTTPException(
             status_code=422,
-            detail="edited_summary and edited_action_items are required (directly or via fallback artifacts)",
+            detail="edited_summary is required (directly or via fallback summary)",
         )
 
     review_id = str(uuid.uuid4())

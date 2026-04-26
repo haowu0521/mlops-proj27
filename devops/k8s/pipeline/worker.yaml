@@ -1,0 +1,40 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: pipeline-worker
+  namespace: platform
+spec:
+  schedule: "*/1 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 2400
+      template:
+        spec:
+          restartPolicy: Never
+          containers:
+          - name: worker
+            image: ghcr.io/haowu0521/mlops-proj27/pipeline-worker:latest
+            imagePullPolicy: Always
+            env:
+            - name: DATA_API_URL
+              value: "http://data-api.platform.svc.cluster.local:8000"
+            - name: ASR_URL
+              value: "http://serving-asr-mlflow.platform.svc.cluster.local:8000"
+            - name: SUMMARIZER_URL
+              value: "http://serving-baseline-mlflow.platform.svc.cluster.local:8000"
+            - name: SOURCE_PREFIX
+              value: "jitsi_recording:"
+            - name: BATCH_SIZE
+              value: "1"
+            - name: RUN_ONCE
+              value: "true"
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "128Mi"
+              limits:
+                cpu: "250m"
+                memory: "256Mi"

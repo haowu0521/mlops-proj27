@@ -1,0 +1,58 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: meeting-dashboard
+  namespace: platform
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: meeting-dashboard
+  template:
+    metadata:
+      labels:
+        app: meeting-dashboard
+    spec:
+      containers:
+      - name: streamlit
+        image: ghcr.io/haowu0521/mlops-proj27/meeting-dashboard:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8501
+        env:
+        - name: DATA_API_URL
+          value: "http://data-api.platform.svc.cluster.local:8000"
+        readinessProbe:
+          httpGet:
+            path: /
+            port: 8501
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        livenessProbe:
+          httpGet:
+            path: /
+            port: 8501
+          initialDelaySeconds: 30
+          periodSeconds: 30
+        resources:
+          requests:
+            cpu: "100m"
+            memory: "256Mi"
+          limits:
+            cpu: "500m"
+            memory: "512Mi"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: meeting-dashboard
+  namespace: platform
+spec:
+  selector:
+    app: meeting-dashboard
+  type: NodePort
+  ports:
+  - name: http
+    port: 8501
+    targetPort: 8501
+    nodePort: 30820
