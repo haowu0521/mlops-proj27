@@ -24,22 +24,54 @@ st.markdown(
     <style>
     .stApp {
       background:
-        radial-gradient(circle at top left, rgba(48, 97, 90, 0.18), transparent 32rem),
-        linear-gradient(135deg, #f7f2e8 0%, #e9f0ea 48%, #dbe7ec 100%);
+        radial-gradient(circle at top left, rgba(30, 115, 109, 0.34), transparent 30rem),
+        radial-gradient(circle at bottom right, rgba(222, 165, 86, 0.2), transparent 34rem),
+        linear-gradient(135deg, #061014 0%, #0b1820 48%, #12161f 100%);
+      color: #f4fbf7;
     }
     .block-container {
       padding-top: 2.3rem;
       max-width: 1180px;
     }
+    h1, h2, h3, h4, h5, h6,
+    p, span, label, div[data-testid="stMarkdownContainer"] {
+      color: #f4fbf7 !important;
+    }
+    .stCaptionContainer, .stCaptionContainer p {
+      color: rgba(244, 251, 247, 0.72) !important;
+    }
     div[data-testid="stMetric"] {
-      background: rgba(255, 255, 255, 0.68);
-      border: 1px solid rgba(34, 54, 52, 0.12);
+      background: linear-gradient(145deg, rgba(19, 32, 41, 0.94), rgba(14, 24, 31, 0.86));
+      border: 1px solid rgba(255, 255, 255, 0.13);
       border-radius: 18px;
       padding: 14px 16px;
-      box-shadow: 0 14px 30px rgba(30, 45, 48, 0.08);
+      box-shadow: 0 18px 38px rgba(0, 0, 0, 0.28);
+    }
+    div[data-testid="stMetricLabel"] p,
+    div[data-testid="stMetricValue"] {
+      color: #ffffff !important;
     }
     .meeting-card {
       padding: 0.2rem 0 0.4rem 0;
+    }
+    div[data-testid="stExpander"] {
+      background: rgba(12, 20, 27, 0.82);
+      border: 1px solid rgba(255, 255, 255, 0.12);
+      border-radius: 18px;
+      margin-bottom: 14px;
+      box-shadow: 0 18px 42px rgba(0, 0, 0, 0.22);
+      overflow: hidden;
+    }
+    div[data-testid="stExpander"] summary {
+      min-height: 3.25rem;
+      padding: 0.6rem 1rem;
+      color: #ffffff !important;
+      font-weight: 800;
+      letter-spacing: 0.01em;
+    }
+    div[data-testid="stExpander"] summary p {
+      color: #ffffff !important;
+      font-size: 1.02rem;
     }
     .status-pill {
       display: inline-block;
@@ -48,12 +80,37 @@ st.markdown(
       margin-right: 0.35rem;
       font-size: 0.78rem;
       font-weight: 700;
-      background: rgba(32, 70, 64, 0.12);
-      color: #1d403b;
+      background: rgba(78, 221, 177, 0.14);
+      color: #9ff6d7 !important;
+      border: 1px solid rgba(159, 246, 215, 0.18);
     }
     .muted {
-      color: rgba(30, 45, 48, 0.72);
+      color: rgba(244, 251, 247, 0.7) !important;
       font-size: 0.9rem;
+    }
+    code {
+      color: #68f0bd !important;
+      background: rgba(104, 240, 189, 0.12) !important;
+      border-radius: 7px;
+      padding: 0.1rem 0.35rem;
+    }
+    .stButton button, .stFormSubmitButton button {
+      background: linear-gradient(135deg, #f0b35f, #f5695f);
+      color: #101820 !important;
+      border: 0;
+      border-radius: 12px;
+      font-weight: 800;
+      box-shadow: 0 12px 26px rgba(245, 105, 95, 0.22);
+    }
+    textarea, input {
+      background-color: rgba(8, 14, 20, 0.74) !important;
+      color: #ffffff !important;
+      border-color: rgba(255, 255, 255, 0.16) !important;
+    }
+    div[role="radiogroup"] label p {
+      color: #ffd166 !important;
+      font-weight: 900 !important;
+      letter-spacing: 0.04em;
     }
     </style>
     """,
@@ -123,6 +180,10 @@ def _preview(text: str | None, limit: int = 420) -> str:
     return cleaned if len(cleaned) <= limit else f"{cleaned[:limit].rstrip()}..."
 
 
+def _stars(score: int) -> str:
+    return "★" * score + "☆" * (5 - score)
+
+
 st.title("Meeting Intelligence Dashboard")
 st.caption("Live summaries, transcripts, and feedback for Jitsi recordings")
 
@@ -170,7 +231,7 @@ for meeting in meetings:
     else:
         title += f" · ASR {meeting.get('asr_status', 'unknown')}"
 
-    with st.expander(title, expanded=bool(meeting.get("summary_id"))):
+    with st.expander(title, expanded=False):
         st.markdown("<div class='meeting-card'>", unsafe_allow_html=True)
         st.markdown(
             f"""
@@ -222,11 +283,14 @@ for meeting in meetings:
                 if default_actions is None:
                     default_actions = meeting.get("action_item_text") or ""
 
-                rating = st.slider(
+                st.markdown("**Rating**")
+                rating = st.radio(
                     "Rating",
-                    min_value=1,
-                    max_value=5,
-                    value=int(meeting.get("rating") or 4),
+                    options=[1, 2, 3, 4, 5],
+                    index=max(0, min(4, int(meeting.get("rating") or 4) - 1)),
+                    format_func=_stars,
+                    horizontal=True,
+                    label_visibility="collapsed",
                     key=f"rating-{meeting_id}",
                 )
                 approved = st.checkbox(
