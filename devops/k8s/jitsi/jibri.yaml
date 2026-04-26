@@ -4,6 +4,13 @@
 # Runs privileged to access /dev/snd (snd-aloop audio loopback).
 # Records to /config/recordings (emptyDir), finalize.sh uploads to MinIO
 # recordings bucket then cleans up.
+#
+# `mc` (MinIO client) is provided by an initContainer that copies the
+# pre-built binary from the official `minio/mc` image into a shared
+# emptyDir mounted at /opt/bin in the jibri container. This avoids the
+# previous fragile pattern of curl-downloading mc at recording-finalize
+# time (which silently failed on transient network errors and left
+# recordings stuck in /config/recordings).
 # ---------------------------------------------------------------------------
 
 apiVersion: v1
@@ -19,14 +26,9 @@ data:
     RECORDING_DIR="$1"
     echo "[finalize] uploading contents of $RECORDING_DIR to MinIO..."
 
-    # Install mc on first run (image has curl)
-    if ! command -v mc >/dev/null 2>&1; then
-      curl -sSL https://dl.min.io/client/mc/release/linux-amd64/mc \
-        -o /usr/local/bin/mc
-      chmod +x /usr/local/bin/mc
-    fi
+    MC=/opt/bin/mc
 
-    mc alias set platform \
+    $MC alias set platform \
       http://minio.platform.svc.cluster.local:9000 \
       minio minio123
 
@@ -35,7 +37,7 @@ data:
       [ -e "$f" ] || continue
       BASENAME=$(basename "$f")
       TS=$(date +%Y%m%d-%H%M%S)
-      mc cp "$f" "platform/recordings/${TS}-${BASENAME}"
+      $MC cp "$f" "platform/recordings/${TS}-${BASENAME}"
       echo "[finalize] uploaded ${TS}-${BASENAME}"
     done
 
@@ -58,6 +60,13 @@ spec:
       labels:
         app: jibri
     spec:
+      initContainers:
+      - name: install-mc
+        image: minio/mc:latest
+        command: ["sh", "-c", "cp /usr/bin/mc /shared/mc && chmod +x /shared/mc"]
+        volumeMounts:
+        - name: shared-tools
+          mountPath: /shared
       containers:
       - name: jibri
         image: jitsi/jibri:stable
@@ -90,6 +99,8 @@ spec:
           subPath: finalize.sh
         - name: dshm
           mountPath: /dev/shm
+        - name: shared-tools
+          mountPath: /opt/bin
       volumes:
       - name: dev-snd
         hostPath:
@@ -104,3 +115,5 @@ spec:
         emptyDir:
           medium: Memory
           sizeLimit: 2Gi
+      - name: shared-tools
+        emptyDir: {}
