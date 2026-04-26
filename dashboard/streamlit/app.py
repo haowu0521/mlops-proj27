@@ -125,7 +125,10 @@ def _request(method: str, path: str, **kwargs: Any) -> requests.Response:
         timeout=REQUEST_TIMEOUT_SECONDS,
         **kwargs,
     )
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        raise RuntimeError(f"{resp.status_code} from data-api: {resp.text}") from exc
     return resp
 
 

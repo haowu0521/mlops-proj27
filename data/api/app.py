@@ -31,6 +31,13 @@ class AsrStatus(str, Enum):
     FAILED = "failed"
 
 
+class CorrectionLabel(str, Enum):
+    NONE = "none"
+    MINOR = "minor"
+    MAJOR = "major"
+    REWRITE = "rewrite"
+
+
 app = FastAPI()
 
 
@@ -66,6 +73,9 @@ class ReviewCreate(BaseModel):
     approved: bool
     edited_summary: Optional[str] = None
     edited_action_items: Optional[str] = None
+    reviewer_id: str = "streamlit-dashboard"
+    correction_label: Optional[CorrectionLabel] = None
+    review_notes: Optional[str] = None
 
 
 class AsrStatusUpdate(BaseModel):
@@ -436,6 +446,7 @@ def get_review(review_id: str):
             """
             SELECT
                 r.review_id,
+                r.reviewer_id,
                 r.meeting_id,
                 t.transcript_text AS transcript,
                 s.summary_text AS original_summary,
@@ -443,8 +454,9 @@ def get_review(review_id: str):
                 r.edited_summary,
                 r.edited_action_items,
                 r.rating,
-                r.edited_flag,
                 r.approved,
+                r.correction_label,
+                r.review_notes,
                 r.created_at
             FROM reviews r
             LEFT JOIN LATERAL (
@@ -479,16 +491,18 @@ def get_review(review_id: str):
 
     return {
         "review_id": str(row[0]),
-        "meeting_id": str(row[1]),
-        "transcript": row[2],
-        "original_summary": row[3],
-        "original_action_items": row[4],
-        "edited_summary": row[5],
-        "edited_action_items": row[6],
-        "rating": row[7],
-        "edited_flag": row[8],
+        "reviewer_id": row[1],
+        "meeting_id": str(row[2]),
+        "transcript": row[3],
+        "original_summary": row[4],
+        "original_action_items": row[5],
+        "edited_summary": row[6],
+        "edited_action_items": row[7],
+        "rating": row[8],
         "approved": row[9],
-        "created_at": row[10],
+        "correction_label": row[10],
+        "review_notes": row[11],
+        "created_at": row[12],
     }
 
 @app.get("/reviews/by_meeting/{meeting_id}")
@@ -498,6 +512,7 @@ def get_reviews_by_meeting(meeting_id: str):
             """
             SELECT
                 r.review_id,
+                r.reviewer_id,
                 r.meeting_id,
                 t.transcript_text AS transcript,
                 s.summary_text AS original_summary,
@@ -505,8 +520,9 @@ def get_reviews_by_meeting(meeting_id: str):
                 r.edited_summary,
                 r.edited_action_items,
                 r.rating,
-                r.edited_flag,
                 r.approved,
+                r.correction_label,
+                r.review_notes,
                 r.created_at
             FROM reviews r
             LEFT JOIN LATERAL (
@@ -543,16 +559,18 @@ def get_reviews_by_meeting(meeting_id: str):
     return [
         {
             "review_id": str(row[0]),
-            "meeting_id": str(row[1]),
-            "transcript": row[2],
-            "original_summary": row[3],
-            "original_action_items": row[4],
-            "edited_summary": row[5],
-            "edited_action_items": row[6],
-            "rating": row[7],
-            "edited_flag": row[8],
+            "reviewer_id": row[1],
+            "meeting_id": str(row[2]),
+            "transcript": row[3],
+            "original_summary": row[4],
+            "original_action_items": row[5],
+            "edited_summary": row[6],
+            "edited_action_items": row[7],
+            "rating": row[8],
             "approved": row[9],
-            "created_at": row[10],
+            "correction_label": row[10],
+            "review_notes": row[11],
+            "created_at": row[12],
         }
         for row in rows
     ]
@@ -594,35 +612,39 @@ def create_summary(payload: SummaryCreate):
 def create_review(payload: ReviewCreate):
     edited_summary = payload.edited_summary
     edited_action_items = payload.edited_action_items
+    original_summary = None
+    original_action_items = None
 
     with db_cursor() as (_, cur):
+        cur.execute(
+            """
+            SELECT summary_text
+            FROM summaries
+            WHERE meeting_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (payload.meeting_id,),
+        )
+        row = cur.fetchone()
+        original_summary = row[0] if row else None
         if not edited_summary:
-            cur.execute(
-                """
-                SELECT summary_text
-                FROM summaries
-                WHERE meeting_id = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (payload.meeting_id,),
-            )
-            row = cur.fetchone()
-            edited_summary = row[0] if row else None
+            edited_summary = original_summary
 
+        cur.execute(
+            """
+            SELECT item_text
+            FROM action_items
+            WHERE meeting_id = %s
+            ORDER BY created_at DESC
+            LIMIT 1
+            """,
+            (payload.meeting_id,),
+        )
+        row = cur.fetchone()
+        original_action_items = row[0] if row else None
         if not edited_action_items:
-            cur.execute(
-                """
-                SELECT item_text
-                FROM action_items
-                WHERE meeting_id = %s
-                ORDER BY created_at DESC
-                LIMIT 1
-                """,
-                (payload.meeting_id,),
-            )
-            row = cur.fetchone()
-            edited_action_items = row[0] if row else None
+            edited_action_items = original_action_items
 
     if edited_action_items is None:
         edited_action_items = ""
@@ -635,7 +657,11 @@ def create_review(payload: ReviewCreate):
 
     review_id = str(uuid.uuid4())
     now = datetime.now(UTC)
-    edited_flag = True
+    correction_label = payload.correction_label
+    if correction_label is None:
+        changed_summary = (edited_summary or "") != (original_summary or "")
+        changed_actions = (edited_action_items or "") != (original_action_items or "")
+        correction_label = CorrectionLabel.MINOR if changed_summary or changed_actions else CorrectionLabel.NONE
 
     with db_cursor(commit=True) as (_, cur):
         cur.execute(
@@ -643,23 +669,38 @@ def create_review(payload: ReviewCreate):
             INSERT INTO reviews (
                 review_id,
                 meeting_id,
+                reviewer_id,
                 edited_summary,
                 edited_action_items,
                 rating,
-                edited_flag,
                 approved,
-                created_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                correction_label,
+                review_notes,
+                created_at,
+                updated_at
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (meeting_id) DO UPDATE SET
+                reviewer_id = EXCLUDED.reviewer_id,
+                edited_summary = EXCLUDED.edited_summary,
+                edited_action_items = EXCLUDED.edited_action_items,
+                rating = EXCLUDED.rating,
+                approved = EXCLUDED.approved,
+                correction_label = EXCLUDED.correction_label,
+                review_notes = EXCLUDED.review_notes,
+                updated_at = EXCLUDED.updated_at
             RETURNING review_id
             """,
             (
                 review_id,
                 payload.meeting_id,
+                payload.reviewer_id,
                 edited_summary,
                 edited_action_items,
                 payload.rating,
-                edited_flag,
                 payload.approved,
+                correction_label.value,
+                payload.review_notes,
+                now,
                 now,
             ),
         )
