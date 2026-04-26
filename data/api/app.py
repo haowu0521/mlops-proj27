@@ -64,6 +64,13 @@ class ReviewCreate(BaseModel):
     edited_action_items: Optional[str] = None
 
 
+class AsrStatusUpdate(BaseModel):
+    asr_status: AsrStatus
+    status: Optional[MeetingStatus] = None
+    asr_job_id: Optional[str] = None
+    asr_last_error: Optional[str] = None
+
+
 @app.get("/health")
 def health():
     return {"status": "ok"}
@@ -141,6 +148,46 @@ def get_meeting_audio(meeting_id: str):
         "audio_object_key": row[1],
         "audio_checksum": row[2],
         "audio_duration_seconds": row[3],
+    }
+
+
+@app.patch("/meetings/{meeting_id}/asr")
+def update_meeting_asr(meeting_id: str, payload: AsrStatusUpdate):
+    now = datetime.now(UTC)
+    with db_cursor(commit=True) as (_, cur):
+        cur.execute(
+            """
+            UPDATE meetings
+            SET asr_status = %s,
+                status = COALESCE(%s, status),
+                asr_job_id = COALESCE(%s, asr_job_id),
+                asr_last_error = %s,
+                asr_completed_at = CASE WHEN %s = 'completed' THEN %s ELSE asr_completed_at END
+            WHERE meeting_id = %s
+            RETURNING meeting_id, status, asr_status, asr_job_id, asr_last_error, asr_completed_at
+            """,
+            (
+                payload.asr_status.value,
+                payload.status.value if payload.status else None,
+                payload.asr_job_id,
+                payload.asr_last_error,
+                payload.asr_status.value,
+                now,
+                meeting_id,
+            ),
+        )
+        row = cur.fetchone()
+
+    if not row:
+        raise HTTPException(status_code=404, detail="meeting not found")
+
+    return {
+        "meeting_id": str(row[0]),
+        "status": row[1],
+        "asr_status": row[2],
+        "asr_job_id": row[3],
+        "asr_last_error": row[4],
+        "asr_completed_at": row[5],
     }
 
 

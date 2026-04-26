@@ -1,0 +1,140 @@
+# ---------------------------------------------------------------------------
+# asr-mlflow.yaml — ASR service that loads the current jitsi-asr@production
+# model (faster-whisper) from the MLflow Registry.
+#
+# Mirror of baseline-mlflow.yaml for symmetry. Same operational pattern:
+# bump @production alias in MLflow → rollout restart this Deployment to
+# pick up the new model.
+#
+# Image is built by .github/workflows/build-images.yml and pushed to
+# ghcr.io/haowu0521/mlops-proj27/serving-asr-mlflow:latest. (Add the
+# new build target there before rolling this out for the first time.)
+#
+# Cold start notes:
+#   - mlflow.pyfunc.load_model() pulls the registered_asr_model artifact
+#     from MinIO (fast, MBs).
+#   - faster-whisper then downloads whisper-small weights (~500MB int8)
+#     from HuggingFace Hub on the first transcription. This step is what
+#     makes cold start slow (60-120s on CPU). Readiness probe is set
+#     tolerant (300s grace).
+# ---------------------------------------------------------------------------
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: serving-asr-mlflow
+  namespace: platform
+spec:
+  replicas: 1
+  # Recreate (not RollingUpdate): same reason as baseline-mlflow — both
+  # pods loading whisper-small at once would briefly need ~3GB extra RAM
+  # and risks OOMing the node during rollout restart.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: serving-asr-mlflow
+  template:
+    metadata:
+      labels:
+        app: serving-asr-mlflow
+    spec:
+      containers:
+      - name: serving
+        image: ghcr.io/haowu0521/mlops-proj27/serving-asr-mlflow:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8000
+        env:
+        - name: MLFLOW_TRACKING_URI
+          value: "http://mlflow.platform.svc.cluster.local:5000"
+        - name: MLFLOW_S3_ENDPOINT_URL
+          value: "http://minio.platform.svc.cluster.local:9000"
+        - name: AWS_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: MINIO_ROOT_USER
+        - name: AWS_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: minio-credentials
+              key: MINIO_ROOT_PASSWORD
+        - name: MODEL_NAME
+          value: "jitsi-asr"
+        - name: MODEL_ALIAS
+          value: "production"
+        - name: AUDIO_BUCKET
+          value: "recordings"
+        - name: TRANSCRIPT_BUCKET
+          value: "jitsi-data"
+        - name: TRANSCRIPT_PREFIX
+          value: "transcripts"
+        - name: DATA_API_URL
+          value: "http://data-api.platform.svc.cluster.local:8000"
+        # whisper-small int8 is ~500MB; ctranslate2 runtime + python libs
+        # add another ~700MB; transcription itself is CPU-heavy. Numbers
+        # match what was measured for baseline-mlflow with similar model
+        # sizes — adjust if you swap to whisper-medium/large.
+        #
+        # ephemeral-storage limits the *entire* container's writable layer
+        # (image overlayfs + log writes + any /tmp not mounted as a
+        # separate volume). If something runaway-leaks here, k8s evicts
+        # the pod long before it can fill /mnt/block on the host.
+        resources:
+          requests:
+            cpu: "200m"
+            memory: "1Gi"
+            ephemeral-storage: "500Mi"
+          limits:
+            cpu: "2000m"
+            memory: "3Gi"
+            ephemeral-storage: "3Gi"
+        volumeMounts:
+        # Mount /tmp as a sized emptyDir so the audio download workspace
+        # is bounded and isolated from the container's writable layer.
+        # The app uses tempfile.NamedTemporaryFile under /tmp and unlinks
+        # in `finally`; this volume + sizeLimit is the safety net for the
+        # pathological case where the process is SIGKILLed mid-transcribe.
+        - name: tmp
+          mountPath: /tmp
+        # Cold start = pyfunc load + first whisper-small download from HF.
+        # Be very tolerant on readiness so we don't get into a CrashLoop
+        # while the model is still downloading.
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 90
+          periodSeconds: 10
+          failureThreshold: 30
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8000
+          initialDelaySeconds: 240
+          periodSeconds: 30
+          failureThreshold: 5
+      volumes:
+      # 2Gi is plenty: a 5MB mp4 fits 400 times. If we somehow exceed
+      # this (concurrent storm + cleanup bug), the pod gets evicted and
+      # restarted — which is fine, and far better than wedging the host.
+      - name: tmp
+        emptyDir:
+          sizeLimit: 2Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: serving-asr-mlflow
+  namespace: platform
+spec:
+  selector:
+    app: serving-asr-mlflow
+  type: NodePort
+  ports:
+  - name: http
+    port: 8000
+    targetPort: 8000
+    # 30810 is taken by serving-baseline-mlflow (summarizer); use 30811
+    # so we can hit both simultaneously without port conflict.
+    nodePort: 30811
