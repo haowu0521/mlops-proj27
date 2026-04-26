@@ -10,6 +10,7 @@ echo "========== Retraining started at $(date) =========="
 sudo docker run --rm \
   -e DATA_API_BASE="http://129.114.27.10:30800" \
   -e RETRAIN_DATA_DIR="/app/training/data" \
+  -e MIN_RETRAIN_EXAMPLES="1" \
   -v "$PWD/data:/app/training/data" \
   -v "$PWD/outputs:/app/training/outputs" \
   proj27-training \
