@@ -60,19 +60,23 @@ data:
     $MC cp --recursive "$RECORDING_DIR/" "platform/recordings/${SESSION_ID}/"
     echo "[finalize] uploaded session $SESSION_ID to platform/recordings/${SESSION_ID}/"
 
-    # Find the mp4 we just uploaded so we can pass its object key to data-api.
-    # There should only be one mp4 per session, but the loop is defensive.
-    MP4_KEY=""
-    for f in "$RECORDING_DIR"/*.mp4; do
-      [ -e "$f" ] && MP4_KEY="${SESSION_ID}/$(basename "$f")"
-    done
+    # Find the media file we just uploaded so we can pass its object key to
+    # data-api. Jibri usually writes mp4, but accept common alternatives so
+    # the API handoff does not silently skip if the container changes format.
+    MEDIA_FILE=$(find "$RECORDING_DIR" -maxdepth 1 -type f \( \
+      -iname '*.mp4' -o -iname '*.webm' -o -iname '*.mkv' \
+    \) | head -n 1 || true)
+    MEDIA_KEY=""
+    if [ -n "$MEDIA_FILE" ]; then
+      MEDIA_KEY="${SESSION_ID}/$(basename "$MEDIA_FILE")"
+    fi
 
-    if [ -z "$MP4_KEY" ]; then
-      echo "[finalize] WARNING: no .mp4 found in $RECORDING_DIR; skipping data-api notification"
+    if [ -z "$MEDIA_KEY" ]; then
+      echo "[finalize] WARNING: no media file found in $RECORDING_DIR; skipping data-api notification"
     else
       STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-      echo "[finalize] notifying data-api: audio_object_key=$MP4_KEY"
-      # -f: fail (non-zero exit) on HTTP >=400 so set -e catches API errors.
+      ENDED_AT="$STARTED_AT"
+      echo "[finalize] notifying data-api: audio_object_key=$MEDIA_KEY"
       #
       # status/asr_status semantics:
       #   meetings.status      = whole-pipeline state, drives the UI's
@@ -85,15 +89,24 @@ data:
       #   asr_status = 'not_requested'    (handoff_asr_jobs.py will queue it)
       # Workers transition: scheduled -> in_progress -> completed
       #                     not_requested -> queued -> processing -> completed
-      curl -fsS -X POST http://data-api.platform.svc.cluster.local:8000/meetings \
+      API_RESPONSE=$(mktemp)
+      HTTP_CODE=$(curl -sS -o "$API_RESPONSE" -w "%{http_code}" \
+        -X POST http://data-api.platform.svc.cluster.local:8000/meetings \
         -H 'Content-Type: application/json' \
         -d "{
           \"source\": \"jitsi_recording:${SESSION_ID}\",
           \"started_at\": \"${STARTED_AT}\",
-          \"audio_object_key\": \"${MP4_KEY}\"
-        }" \
-        || echo "[finalize] WARNING: data-api notification failed; recording is in MinIO but no meeting row was created"
-      echo
+          \"ended_at\": \"${ENDED_AT}\",
+          \"audio_object_key\": \"${MEDIA_KEY}\",
+          \"status\": \"scheduled\",
+          \"asr_status\": \"not_requested\"
+        }" || true)
+
+      echo "[finalize] data-api HTTP ${HTTP_CODE}: $(cat "$API_RESPONSE")"
+      if [ "$HTTP_CODE" -lt 200 ] || [ "$HTTP_CODE" -ge 300 ]; then
+        echo "[finalize] WARNING: data-api notification failed; recording is in MinIO but no meeting row was created"
+      fi
+      rm -f "$API_RESPONSE"
     fi
 
     # Clean up local copy regardless of whether the API call succeeded —
