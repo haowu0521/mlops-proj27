@@ -11,6 +11,20 @@
 # previous fragile pattern of curl-downloading mc at recording-finalize
 # time (which silently failed on transient network errors and left
 # recordings stuck in /config/recordings).
+#
+# finalize.sh layout in MinIO:
+#   recordings/<jibri_session_id>/metadata.json
+#   recordings/<jibri_session_id>/<roomname>_<datetime>.mp4
+# Using jibri's session_id (the directory jibri itself created under
+# /config/recordings/) as the MinIO key prefix gives us a strong
+# 1-to-many group key: mp4 + metadata.json always travel together,
+# the prefix is traceable back to the jibri log line that produced
+# the recording, and listing one folder gives the entire artifact set
+# for one meeting.
+#
+# After upload finalize.sh notifies data-api by POSTing /meetings,
+# which inserts a row with audio_object_key set and asr_status =
+# 'not_requested'. handoff_asr_jobs.py picks it up from there.
 # ---------------------------------------------------------------------------
 
 apiVersion: v1
@@ -21,27 +35,70 @@ metadata:
 data:
   finalize.sh: |
     #!/bin/bash
-    # $1 = path to recording directory
+    # $1 = path to recording directory, e.g. /config/recordings/<jibri_session_id>
+    #
+    # Two responsibilities:
+    #   1. Upload the recording folder to MinIO under recordings/<session_id>/
+    #      so mp4 + metadata.json stay grouped under a stable, traceable key.
+    #   2. POST a meetings row to data-api with audio_object_key pointing at
+    #      the mp4. This is the trigger that makes the meeting eligible for
+    #      ASR (handoff_asr_jobs.py claims rows with asr_status='not_requested'
+    #      and audio_object_key IS NOT NULL).
     set -eu
     RECORDING_DIR="$1"
-    echo "[finalize] uploading contents of $RECORDING_DIR to MinIO..."
+    SESSION_ID=$(basename "$RECORDING_DIR")
+
+    echo "[finalize] session=$SESSION_ID dir=$RECORDING_DIR"
 
     MC=/opt/bin/mc
-
     $MC alias set platform \
       http://minio.platform.svc.cluster.local:9000 \
       minio minio123
 
-    # Upload every file under the recording dir, keep its basename
-    for f in "$RECORDING_DIR"/*; do
-      [ -e "$f" ] || continue
-      BASENAME=$(basename "$f")
-      TS=$(date +%Y%m%d-%H%M%S)
-      $MC cp "$f" "platform/recordings/${TS}-${BASENAME}"
-      echo "[finalize] uploaded ${TS}-${BASENAME}"
+    # Upload the whole directory in one call so mp4 + metadata.json land
+    # atomically under recordings/<session_id>/ with their original names.
+    $MC cp --recursive "$RECORDING_DIR/" "platform/recordings/${SESSION_ID}/"
+    echo "[finalize] uploaded session $SESSION_ID to platform/recordings/${SESSION_ID}/"
+
+    # Find the mp4 we just uploaded so we can pass its object key to data-api.
+    # There should only be one mp4 per session, but the loop is defensive.
+    MP4_KEY=""
+    for f in "$RECORDING_DIR"/*.mp4; do
+      [ -e "$f" ] && MP4_KEY="${SESSION_ID}/$(basename "$f")"
     done
 
-    # Clean up local copy
+    if [ -z "$MP4_KEY" ]; then
+      echo "[finalize] WARNING: no .mp4 found in $RECORDING_DIR; skipping data-api notification"
+    else
+      STARTED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+      echo "[finalize] notifying data-api: audio_object_key=$MP4_KEY"
+      # -f: fail (non-zero exit) on HTTP >=400 so set -e catches API errors.
+      #
+      # status/asr_status semantics:
+      #   meetings.status      = whole-pipeline state, drives the UI's
+      #                          "is this meeting ready to view?" indicator
+      #   meetings.asr_status  = fine-grained ASR-step state for workers
+      #
+      # At finalize time the recording is in MinIO but ASR + summary haven't
+      # run yet, so we leave both at their schema defaults:
+      #   status     = 'scheduled'        (waiting in the pipeline)
+      #   asr_status = 'not_requested'    (handoff_asr_jobs.py will queue it)
+      # Workers transition: scheduled -> in_progress -> completed
+      #                     not_requested -> queued -> processing -> completed
+      curl -fsS -X POST http://data-api.platform.svc.cluster.local:8000/meetings \
+        -H 'Content-Type: application/json' \
+        -d "{
+          \"source\": \"jitsi_recording:${SESSION_ID}\",
+          \"started_at\": \"${STARTED_AT}\",
+          \"audio_object_key\": \"${MP4_KEY}\"
+        }" \
+        || echo "[finalize] WARNING: data-api notification failed; recording is in MinIO but no meeting row was created"
+      echo
+    fi
+
+    # Clean up local copy regardless of whether the API call succeeded —
+    # the recording is safely in MinIO at this point and leaving it on the
+    # ephemeral pod disk just risks filling /config on a busy jibri.
     rm -rf "$RECORDING_DIR"
     echo "[finalize] done."
 ---
