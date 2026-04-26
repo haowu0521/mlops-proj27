@@ -1,63 +1,79 @@
 #!/bin/bash
 set -euo pipefail
 
-PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="/home/cc/mlops-proj27"
+TRAINING_DIR="${PROJECT_DIR}/training"
 
-mkdir -p "$PROJECT_DIR/data" "$PROJECT_DIR/outputs" "$PROJECT_DIR/logs"
+RUN_SCRIPT="${TRAINING_DIR}/run_retraining_docker.sh"
+LOG_DIR="${TRAINING_DIR}/logs"
+LOG_FILE="${LOG_DIR}/retraining_cron.log"
 
-cat > "$PROJECT_DIR/run_retraining_docker.sh" <<EOF
-#!/bin/bash
-set -euo pipefail
-
-export PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
-
-PROJECT_DIR="$PROJECT_DIR"
 LOCK_FILE="/tmp/proj27_retraining.lock"
+CRON_TAG="PROJ27_RETRAINING_CRON"
 
-cd "\$PROJECT_DIR"
+# Run every minute.
+# The flock lock prevents concurrent retraining jobs.
+CRON_SCHEDULE="* * * * *"
 
-mkdir -p data outputs logs
+echo "========== Setting up retraining cron =========="
+echo "[INFO] Project directory: ${PROJECT_DIR}"
+echo "[INFO] Training directory: ${TRAINING_DIR}"
+echo "[INFO] Run script: ${RUN_SCRIPT}"
+echo "[INFO] Log file: ${LOG_FILE}"
+echo "[INFO] Lock file: ${LOCK_FILE}"
 
-(
-  flock -n 9 || {
-    echo "========== Previous retraining job is still running, skip at \$(date) =========="
-    exit 0
-  }
+if [ ! -d "${TRAINING_DIR}" ]; then
+  echo "[ERROR] Training directory does not exist: ${TRAINING_DIR}"
+  exit 1
+fi
 
-  echo "========== Retraining check started at \$(date) =========="
+if [ ! -f "${RUN_SCRIPT}" ]; then
+  echo "[ERROR] Run script does not exist: ${RUN_SCRIPT}"
+  exit 1
+fi
 
-  if docker info >/dev/null 2>&1; then
-    docker run --rm \
-      -e DATA_API_BASE="http://129.114.27.10:30800" \
-      -e RETRAIN_DATA_DIR="/app/training/data" \
-      -v "\$PWD/data:/app/training/data" \
-      -v "\$PWD/outputs:/app/training/outputs" \
-      proj27-training \
-      python3 run_retraining_from_reviews_v2.py
-  else
-    sudo -n docker run --rm \
-      -e DATA_API_BASE="http://129.114.27.10:30800" \
-      -e RETRAIN_DATA_DIR="/app/training/data" \
-      -v "\$PWD/data:/app/training/data" \
-      -v "\$PWD/outputs:/app/training/outputs" \
-      proj27-training \
-      python3 run_retraining_from_reviews_v2.py
-  fi
+mkdir -p "${TRAINING_DIR}/data"
+mkdir -p "${TRAINING_DIR}/outputs"
+mkdir -p "${LOG_DIR}"
 
-  echo "========== Retraining check finished at \$(date) =========="
-) 9>"\$LOCK_FILE"
-EOF
+chmod +x "${RUN_SCRIPT}"
 
-chmod +x "$PROJECT_DIR/run_retraining_docker.sh"
+if ! command -v flock >/dev/null 2>&1; then
+  echo "[ERROR] flock is not installed or not available in PATH."
+  echo "[ERROR] Please install util-linux or use an instance image that includes flock."
+  exit 1
+fi
 
-CRON_LINE="* * * * * $PROJECT_DIR/run_retraining_docker.sh >> $PROJECT_DIR/logs/retraining_cron.log 2>&1"
+FLOCK_BIN="$(command -v flock)"
+BASH_BIN="$(command -v bash)"
 
-# Remove old retraining cron line if it already exists, then add the new one
-( crontab -l 2>/dev/null | grep -v "$PROJECT_DIR/run_retraining_docker.sh" ; echo "$CRON_LINE" ) | crontab -
+# This cron command:
+# - uses flock to prevent concurrent retraining
+# - runs the retraining Docker script
+# - appends stdout/stderr to the cron log file
+CRON_CMD="${CRON_SCHEDULE} ${FLOCK_BIN} -n ${LOCK_FILE} ${BASH_BIN} ${RUN_SCRIPT} >> ${LOG_FILE} 2>&1 # ${CRON_TAG}"
 
-echo "[OK] Automatic retraining cron job installed."
-echo "[OK] It will run every 1 minute."
-echo "[OK] Log file: $PROJECT_DIR/logs/retraining_cron.log"
-echo
-echo "Current cron jobs:"
-crontab -l
+TMP_CRON="$(mktemp)"
+
+# Keep existing cron jobs, but remove previous versions of this retraining cron.
+crontab -l 2>/dev/null | grep -v "${CRON_TAG}" | grep -v "${RUN_SCRIPT}" > "${TMP_CRON}" || true
+
+echo "${CRON_CMD}" >> "${TMP_CRON}"
+
+crontab "${TMP_CRON}"
+rm -f "${TMP_CRON}"
+
+echo "========== Retraining cron installed =========="
+echo "[INFO] Current retraining cron entry:"
+crontab -l | grep "${CRON_TAG}" || true
+
+echo ""
+echo "[INFO] To view cron logs:"
+echo "tail -f ${LOG_FILE}"
+
+echo ""
+echo "[INFO] To disable this retraining cron later:"
+echo "crontab -l | grep -v '${CRON_TAG}' | crontab -"
+
+echo ""
+echo "[INFO] Setup finished successfully."
