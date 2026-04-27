@@ -1,8 +1,0 @@
-{
-  "dataset_version": "v20260407_030840",
-  "created_at": "2026-04-07T03:08:40.777130+00:00",
-  "num_examples": 5,
-  "train_count": 3,
-  "val_count": 1,
-  "test_count": 1
-}
