@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS meetings (
 
 CREATE TABLE IF NOT EXISTS transcripts (
     transcript_id UUID PRIMARY KEY,
-    meeting_id UUID REFERENCES meetings(meeting_id),
+    meeting_id UUID NOT NULL REFERENCES meetings(meeting_id),
     transcript_text TEXT,
     transcript_object_key TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -27,7 +27,7 @@ CREATE TABLE IF NOT EXISTS transcripts (
 
 CREATE TABLE IF NOT EXISTS summaries (
     summary_id UUID PRIMARY KEY,
-    meeting_id UUID REFERENCES meetings(meeting_id),
+    meeting_id UUID NOT NULL REFERENCES meetings(meeting_id),
     model_version TEXT,
     summary_text TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
@@ -35,20 +35,24 @@ CREATE TABLE IF NOT EXISTS summaries (
 
 CREATE TABLE IF NOT EXISTS action_items (
     action_item_id UUID PRIMARY KEY,
-    meeting_id UUID REFERENCES meetings(meeting_id),
+    meeting_id UUID NOT NULL REFERENCES meetings(meeting_id),
     item_text TEXT,
     created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 CREATE TABLE IF NOT EXISTS reviews (
     review_id UUID PRIMARY KEY,
-    meeting_id UUID REFERENCES meetings(meeting_id),
-    edited_summary TEXT,
-    edited_action_items TEXT,
-    rating INT,
+    meeting_id UUID NOT NULL UNIQUE REFERENCES meetings(meeting_id),
+    reviewer_id TEXT NOT NULL DEFAULT 'streamlit-dashboard',
+    edited_summary TEXT NOT NULL,
+    edited_action_items TEXT NOT NULL,
+    rating INT NOT NULL CHECK (rating BETWEEN 1 AND 5),
     edited_flag BOOLEAN DEFAULT FALSE,
-    approved BOOLEAN DEFAULT FALSE,
-    created_at TIMESTAMPTZ DEFAULT NOW()
+    approved BOOLEAN NOT NULL DEFAULT FALSE,
+    correction_label TEXT NOT NULL DEFAULT 'none' CHECK (correction_label IN ('none', 'minor', 'major', 'rewrite')),
+    review_notes TEXT,
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE INDEX IF NOT EXISTS idx_reviews_meeting_id ON reviews (meeting_id);

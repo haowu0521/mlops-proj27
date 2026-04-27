@@ -8,18 +8,28 @@
 
 Required fields:
 - `review_id` (UUID, PK)
-- `meeting_id` (UUID, FK, UNIQUE)
-- `reviewer_id` (TEXT, NOT NULL)
+- `meeting_id` (UUID, FK, UNIQUE, NOT NULL)
+- `reviewer_id` (TEXT, NOT NULL, default `streamlit-dashboard`)
 - `rating` (INT, 1..5, NOT NULL)
-- `approved` (BOOLEAN, NOT NULL)
-- `correction_label` (`none | minor | major | rewrite`, NOT NULL)
+- `approved` (BOOLEAN, NOT NULL, default `false`)
+- `correction_label` (`none | minor | major | rewrite`, NOT NULL, default `none`)
 - `edited_summary` (TEXT, NOT NULL)
 - `edited_action_items` (TEXT, NOT NULL)
 - `created_at` (TIMESTAMPTZ)
-- `updated_at` (TIMESTAMPTZ)
+- `updated_at` (TIMESTAMPTZ, NOT NULL, default `CURRENT_TIMESTAMP`)
 
 Optional:
 - `review_notes` (TEXT, nullable)
+
+Constraints:
+- `CHECK (rating BETWEEN 1 AND 5)`
+- `CHECK (correction_label IN ('none', 'minor', 'major', 'rewrite'))`
+
+Child entity foreign-key requirements:
+- `transcripts.meeting_id` is `NOT NULL`
+- `summaries.meeting_id` is `NOT NULL`
+- `action_items.meeting_id` is `NOT NULL`
+- `reviews.meeting_id` is `NOT NULL`
 
 ### Meeting lifecycle enums
 
@@ -86,8 +96,11 @@ Migration-safe path for existing DBs:
 
 Migration details include:
 - Reviews contract columns + constraints + indexes
+- Backfill + default alignment for `reviewer_id`, `correction_label`, `updated_at`, `rating`, and `approved` prior to `NOT NULL`
+- Guarded unique constraint creation for one review per meeting (`reviews_meeting_id_key`)
 - Meeting audio/ASR columns + enum checks
 - Backfill of review text fields from latest summaries/action_items where missing
+- Null-`meeting_id` child-row cleanup then `NOT NULL` enforcement on `transcripts`, `summaries`, `action_items`, and `reviews`
 - Backfill of `asr_status` from transcript presence
 
 ---
