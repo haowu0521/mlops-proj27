@@ -49,6 +49,11 @@ ALTER TABLE reviews
     ADD COLUMN IF NOT EXISTS review_notes TEXT,
     ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ;
 
+DELETE FROM transcripts WHERE meeting_id IS NULL;
+DELETE FROM summaries WHERE meeting_id IS NULL;
+DELETE FROM action_items WHERE meeting_id IS NULL;
+DELETE FROM reviews WHERE meeting_id IS NULL;
+
 UPDATE reviews r
 SET edited_summary = COALESCE(
     NULLIF(r.edited_summary, ''),
@@ -76,12 +81,36 @@ SET edited_action_items = COALESCE(
 );
 
 UPDATE reviews
-SET reviewer_id = COALESCE(NULLIF(reviewer_id, ''), 'unknown-reviewer'),
-    approved = COALESCE(approved, TRUE),
-    correction_label = COALESCE(NULLIF(correction_label, ''), 'minor'),
+SET reviewer_id = COALESCE(NULLIF(reviewer_id, ''), 'streamlit-dashboard'),
+    approved = COALESCE(approved, FALSE),
+    correction_label = COALESCE(NULLIF(correction_label, ''), 'none'),
+    rating = COALESCE(rating, 3),
     updated_at = COALESCE(updated_at, created_at, NOW());
 
+UPDATE reviews
+SET correction_label = 'none'
+WHERE correction_label NOT IN ('none', 'minor', 'major', 'rewrite');
+
+UPDATE reviews
+SET rating = 3
+WHERE rating < 1 OR rating > 5;
+
 ALTER TABLE reviews
+    ALTER COLUMN reviewer_id SET DEFAULT 'streamlit-dashboard',
+    ALTER COLUMN correction_label SET DEFAULT 'none',
+    ALTER COLUMN updated_at SET DEFAULT CURRENT_TIMESTAMP;
+
+ALTER TABLE transcripts
+    ALTER COLUMN meeting_id SET NOT NULL;
+
+ALTER TABLE summaries
+    ALTER COLUMN meeting_id SET NOT NULL;
+
+ALTER TABLE action_items
+    ALTER COLUMN meeting_id SET NOT NULL;
+
+ALTER TABLE reviews
+    ALTER COLUMN meeting_id SET NOT NULL,
     ALTER COLUMN reviewer_id SET NOT NULL,
     ALTER COLUMN approved SET NOT NULL,
     ALTER COLUMN correction_label SET NOT NULL,
