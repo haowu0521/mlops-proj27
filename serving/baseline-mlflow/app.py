@@ -20,6 +20,12 @@
 #   not here. (Env vars MAX_NEW_TOKENS / NUM_BEAMS from the old workaround
 #   are intentionally removed so nobody thinks they still do anything.)
 #
+# ONNX Support:
+#   This service now checks for ONNX model artifacts in MLflow. If present,
+#   uses optimum.onnxruntime for inference. Falls back to pyfunc (PyTorch)
+#   if ONNX not available. ONNX export happens automatically in training
+#   after successful model registration.
+#
 # Env vars:
 #   MLFLOW_TRACKING_URI     - http://mlflow.platform.svc.cluster.local:5000
 #   MLFLOW_S3_ENDPOINT_URL  - http://minio.platform.svc.cluster.local:9000
@@ -33,14 +39,17 @@
 import logging
 import os
 import re
+from pathlib import Path
 from typing import Any, List, Tuple
 
+import mlflow
 import mlflow.pyfunc
 import pandas as pd
 import requests
 from fastapi import FastAPI, HTTPException
 from mlflow.tracking import MlflowClient
 from pydantic import BaseModel
+from transformers import AutoTokenizer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("serving")
@@ -57,28 +66,116 @@ DATA_API_TIMEOUT_SECONDS = float(os.environ.get("DATA_API_TIMEOUT_SECONDS", "30"
 app = FastAPI(title="jitsi-summarizer (MLflow-backed)")
 
 
-def _load_pyfunc_model():
-    """Resolve the alias -> version for logging, then load via pyfunc.
-
-    The MlflowClient call is purely for observability — if it fails we
-    still try the pyfunc load, which is the thing that actually matters.
+def _load_model():
+    """Load ONNX model if available, otherwise fallback to pyfunc (PyTorch).
+    
+    First checks MLflow for onnx_model artifacts. If present, uses optimum.onnxruntime
+    for inference. Otherwise falls back to the pyfunc model.
     """
+    client = MlflowClient()
+    
     try:
-        client = MlflowClient()
         mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
         log.info("Alias %s -> version %s (run_id=%s)", MODEL_ALIAS, mv.version, mv.run_id)
     except Exception as e:
         log.warning("Could not resolve alias metadata (non-fatal): %s", e)
+        mv = None
 
-    log.info("Loading pyfunc model: %s", MODEL_URI)
+    onnx_model = None
+    
+    if mv:
+        try:
+            onnx_artifacts = client.list_artifacts(mv.run_id, "onnx_model")
+            if onnx_artifacts:
+                log.info("ONNX artifacts found, attempting to load ONNX model...")
+                onnx_model = _load_onnx_model(mv.run_id)
+                log.info("ONNX model loaded successfully!")
+                return onnx_model
+        except Exception as e:
+            log.warning("Could not load ONNX model, falling back to pyfunc: %s", e)
+
+    log.info("Loading pyfunc model (PyTorch fallback): %s", MODEL_URI)
     model = mlflow.pyfunc.load_model(MODEL_URI)
-    log.info("Model loaded; ready to serve.")
+    log.info("Pyfunc model loaded; ready to serve.")
     return model
+
+
+def _load_onnx_model(run_id: str):
+    """Load ONNX model from MLflow artifacts using optimum.onnxruntime."""
+    from optimum.onnxruntime import ORTModelForSeq2SeqLM
+    
+    import tempfile
+    import shutil
+    
+    local_dir = tempfile.mkdtemp(prefix="onnx_model_")
+    try:
+        mlflow.artifacts.download_artifacts(
+            run_id=run_id,
+            artifact_path="onnx_model",
+            dst_path=local_dir,
+        )
+        
+        onnx_files = list(Path(local_dir).rglob("*.onnx"))
+        if not onnx_files:
+            raise FileNotFoundError("No .onnx files found in onnx_model artifacts")
+        
+        model_path = onnx_files[0].parent
+        log.info("Loading ONNX model from: %s", model_path)
+        
+        tokenizer = AutoTokenizer.from_pretrained(model_path)
+        model = ORTModelForSeq2SeqLM.from_pretrained(model_path, file_name=onnx_files[0].name)
+        
+        return _ONNXInferenceModel(model, tokenizer)
+    except Exception as e:
+        shutil.rmtree(local_dir, ignore_errors=True)
+        raise e
+
+
+class _ONNXInferenceModel:
+    """Wrapper for ONNX model to match pyfunc interface."""
+    
+    def __init__(self, model, tokenizer):
+        self.model = model
+        self.tokenizer = tokenizer
+    
+    def predict(self, model_input: pd.DataFrame) -> pd.DataFrame:
+        if isinstance(model_input, pd.DataFrame):
+            if "text" in model_input.columns:
+                texts = model_input["text"].astype(str).tolist()
+            else:
+                texts = model_input.iloc[:, 0].astype(str).tolist()
+        elif isinstance(model_input, list):
+            texts = [str(x) for x in model_input]
+        else:
+            texts = [str(model_input)]
+        
+        inputs = self.tokenizer(
+            texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=512,
+        )
+        
+        outputs = self.model.generate(
+            **inputs,
+            max_new_tokens=128,
+            num_beams=4,
+            early_stopping=True,
+        )
+        
+        summaries = self.tokenizer.batch_decode(
+            outputs,
+            skip_special_tokens=True,
+        )
+        summaries = [s.strip() for s in summaries]
+        
+        return pd.DataFrame({"summary": summaries })
 
 
 # Load once at startup. If this fails, the pod crashes and k8s reschedules —
 # which is what we want for a broken model promotion.
-_model = _load_pyfunc_model()
+_model = _load_model()
 
 
 class PredictRequest(BaseModel):

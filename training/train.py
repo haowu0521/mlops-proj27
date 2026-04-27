@@ -387,6 +387,39 @@ class SummarizationPyFuncModel(mlflow.pyfunc.PythonModel):
         return pd.DataFrame({"summary": summaries})
 
 
+def export_onnx_model(
+    output_dir: str,
+    run_id: str,
+    registered_model_name: str,
+    registered_model_version: int,
+) -> None:
+    from optimum.exporters.onnx import main_export
+    from tempfile import TemporaryDirectory as OTempDir
+
+    print(f"Exporting model to ONNX format from {output_dir}...")
+
+    with OTempDir() as tmpdir:
+        onnx_output_dir = Path(tmpdir) / "onnx_model"
+        onnx_output_dir.mkdir(parents=True, exist_ok=True)
+
+        main_export(
+            model_name_or_path=output_dir,
+            output=onnx_output_dir,
+            task="text2text-generation",
+            no_post_process=False,
+            optimize="O4",
+        )
+
+        for onnx_file in onnx_output_dir.rglob("*.onnx"):
+            relative_path = onnx_file.relative_to(onnx_output_dir)
+            mlflow.log_artifact(
+                str(onnx_file),
+                artifact_path=f"onnx_model/{relative_path.parent}",
+            )
+
+        print(f"ONNX model exported and logged to MLflow for {registered_model_name} v{registered_model_version}")
+
+
 def log_and_optionally_register_model(
     output_dir: str,
     run_id: str,
@@ -466,6 +499,17 @@ def log_and_optionally_register_model(
             )
         except Exception as e:
             print(f"Warning: failed to set alias '{registered_model_alias}': {e}")
+
+        if _env_bool("EXPORT_ONNX", True):
+            try:
+                export_onnx_model(
+                    output_dir=str(Path(output_dir).resolve()),
+                    run_id=run_id,
+                    registered_model_name=registered_model_name,
+                    registered_model_version=registration.version,
+                )
+            except Exception as e:
+                print(f"Warning: failed to export ONNX model: {e}")
 
         return model_uri, registered_model_name, registration, passed_gate
 

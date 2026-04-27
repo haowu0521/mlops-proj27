@@ -19,3 +19,4 @@ requests==2.32.3
 # the k3s CPU node.
 transformers==5.5.4
 sentencepiece
+optimum[onnxruntime]
