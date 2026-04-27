@@ -27,10 +27,10 @@ data:
   max_test_samples: null
 
 model:
-  model_name: "facebook/bart-base"
-  source_prefix: "summarize: "
-  max_source_length: 512
-  max_target_length: 128
+  model_name: sshleifer/distilbart-cnn-12-6
+  source_prefix: ""
+  max_source_length: 1024
+  max_target_length: 256
 
 train:
   output_dir: "outputs/bart_retraining_from_reviews"
