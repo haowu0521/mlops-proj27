@@ -11,10 +11,6 @@ import requests
 
 DATA_API_BASE = os.environ.get("DATA_API_BASE", "http://129.114.27.10:30800").rstrip("/")
 
-MEETING_MANIFEST_PATH = Path(
-    os.environ.get("MEETING_MANIFEST_PATH", "data/meeting_manifest.jsonl")
-)
-
 OUTPUT_DIR = Path(os.environ.get("RETRAIN_DATA_DIR", "data"))
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -27,10 +23,14 @@ SEED = int(os.environ.get("DATASET_SPLIT_SEED", "42"))
 VAL_RATIO = float(os.environ.get("VAL_RATIO", "0.2"))
 TEST_RATIO = float(os.environ.get("TEST_RATIO", "0.1"))
 
-MIN_RATING = int(os.environ.get("MIN_RATING", "4"))
-REQUIRE_APPROVED = os.environ.get("REQUIRE_APPROVED", "true").lower() == "true"
+# Demo-friendly defaults:
+# - allow any rating by default
+# - do not require approved=true by default
+# - require edited_summary because it is the supervised target
+MIN_RATING = int(os.environ.get("MIN_RATING", "0"))
+REQUIRE_APPROVED = os.environ.get("REQUIRE_APPROVED", "false").lower() == "true"
 REQUIRE_EDITED_SUMMARY = os.environ.get("REQUIRE_EDITED_SUMMARY", "true").lower() == "true"
-MIN_SUMMARY_CHARS = int(os.environ.get("MIN_SUMMARY_CHARS", "10"))
+MIN_SUMMARY_CHARS = int(os.environ.get("MIN_SUMMARY_CHARS", "5"))
 
 REQUEST_TIMEOUT = (10, 120)
 
@@ -73,7 +73,7 @@ def normalize_payload_to_list(payload: Any) -> List[Dict[str, Any]]:
         return [x for x in payload if isinstance(x, dict)]
 
     if isinstance(payload, dict):
-        for key in ("items", "results", "data", "reviews", "rows"):
+        for key in ("items", "results", "data", "reviews", "meetings", "rows"):
             value = payload.get(key)
             if isinstance(value, list):
                 return [x for x in value if isinstance(x, dict)]
@@ -131,30 +131,31 @@ def get_review_id(review: Dict[str, Any]) -> str:
     ).strip()
 
 
-def get_meeting_id_from_review(review: Dict[str, Any]) -> str:
+def get_meeting_id_from_record(record: Dict[str, Any]) -> str:
     meeting_id = str(
-        review.get("meeting_id")
-        or review.get("meetingId")
-        or review.get("meeting_uuid")
+        record.get("meeting_id")
+        or record.get("meetingId")
+        or record.get("meeting_uuid")
+        or record.get("id")
         or ""
     ).strip()
 
     if meeting_id:
         return meeting_id
 
-    meeting_obj = review.get("meeting")
+    meeting_obj = record.get("meeting")
     if isinstance(meeting_obj, dict):
         return str(
             meeting_obj.get("meeting_id")
-            or meeting_obj.get("id")
             or meeting_obj.get("meetingId")
+            or meeting_obj.get("id")
             or ""
         ).strip()
 
     return ""
 
 
-def read_meeting_ids_from_env() -> List[str]:
+def get_meeting_ids_from_env() -> List[str]:
     raw = os.environ.get("MEETING_IDS", "").strip()
 
     if not raw:
@@ -172,97 +173,38 @@ def read_meeting_ids_from_env() -> List[str]:
     return meeting_ids
 
 
-def read_meeting_ids_from_manifest(path: Path) -> List[str]:
-    if not path.exists():
-        print(f"[WARN] Meeting manifest not found: {path}")
-        return []
+def get_meeting_ids_from_api() -> Tuple[List[str], List[str]]:
+    errors: List[str] = []
+
+    payload = get_json("/meetings")
+    meetings = normalize_payload_to_list(payload)
 
     meeting_ids: List[str] = []
     seen = set()
 
-    with path.open("r", encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
+    for meeting in meetings:
+        meeting_id = get_meeting_id_from_record(meeting)
 
-            if not line:
-                continue
+        if meeting_id and meeting_id not in seen:
+            seen.add(meeting_id)
+            meeting_ids.append(meeting_id)
+        elif not meeting_id:
+            errors.append(f"Meeting record has no meeting_id: {meeting}")
 
-            try:
-                row = json.loads(line)
-            except Exception:
-                print(f"[WARN] Skipping invalid manifest line: {line}")
-                continue
-
-            meeting_id = str(
-                row.get("meeting_id")
-                or row.get("meetingId")
-                or row.get("id")
-                or ""
-            ).strip()
-
-            if meeting_id and meeting_id not in seen:
-                seen.add(meeting_id)
-                meeting_ids.append(meeting_id)
-
-    return meeting_ids
+    return meeting_ids, errors
 
 
-def get_meeting_ids() -> Tuple[List[str], str]:
-    env_meeting_ids = read_meeting_ids_from_env()
+def get_meeting_ids() -> Tuple[List[str], str, List[str]]:
+    env_ids = get_meeting_ids_from_env()
 
-    if env_meeting_ids:
-        return env_meeting_ids, "MEETING_IDS"
+    if env_ids:
+        return env_ids, "MEETING_IDS", []
 
-    manifest_meeting_ids = read_meeting_ids_from_manifest(MEETING_MANIFEST_PATH)
-
-    if manifest_meeting_ids:
-        return manifest_meeting_ids, str(MEETING_MANIFEST_PATH)
-
-    return [], str(MEETING_MANIFEST_PATH)
-
-
-def get_reviews_by_meeting(meeting_id: str) -> List[Dict[str, Any]]:
-    payload = get_json(f"/reviews/by_meeting/{meeting_id}")
-    return normalize_payload_to_list(payload)
-
-
-def get_review_by_id(review_id: str) -> Dict[str, Any]:
-    payload = get_json(f"/reviews/{review_id}")
-    return normalize_payload_to_dict(payload)
-
-
-def get_reviews_from_review_ids() -> Tuple[List[Dict[str, Any]], str]:
-    raw = os.environ.get("REVIEW_IDS", "").strip()
-
-    if not raw:
-        return [], ""
-
-    review_ids: List[str] = []
-    seen = set()
-
-    for part in raw.replace("\n", ",").replace(" ", ",").split(","):
-        review_id = part.strip()
-        if review_id and review_id not in seen:
-            seen.add(review_id)
-            review_ids.append(review_id)
-
-    reviews: List[Dict[str, Any]] = []
-    errors: List[str] = []
-
-    for review_id in review_ids:
-        try:
-            review = get_review_by_id(review_id)
-            reviews.append(review)
-        except Exception as e:
-            errors.append(f"{review_id}: {e}")
-            print(f"[WARN] Could not fetch review_id={review_id}: {e}")
-
-    if errors:
-        print("[WARN] Some REVIEW_IDS could not be loaded:")
-        for err in errors:
-            print(f"[WARN] {err}")
-
-    return reviews, "REVIEW_IDS"
+    try:
+        api_ids, errors = get_meeting_ids_from_api()
+        return api_ids, "/meetings", errors
+    except Exception as e:
+        return [], "/meetings", [f"Failed to load meeting IDs from /meetings: {e}"]
 
 
 def get_meeting(meeting_id: str) -> Dict[str, Any]:
@@ -271,6 +213,11 @@ def get_meeting(meeting_id: str) -> Dict[str, Any]:
     except Exception as e:
         print(f"[WARN] Could not fetch meeting {meeting_id}: {e}")
         return {}
+
+
+def get_reviews_by_meeting(meeting_id: str) -> List[Dict[str, Any]]:
+    payload = get_json(f"/reviews/by_meeting/{meeting_id}")
+    return normalize_payload_to_list(payload)
 
 
 def get_summary_by_meeting(meeting_id: str) -> Dict[str, Any]:
@@ -354,11 +301,10 @@ def build_example(
     return {
         "meeting_id": meeting_id,
 
-        # Important:
-        # The field name is kept as input_transcript so train.py and config.yaml
-        # do not need to change. However, the value is the original generated summary.
-        # This makes the retraining task:
-        # original_summary -> edited_summary
+        # For compatibility with train.py/config.yaml, the field name remains
+        # input_transcript. In this version, the value is actually the original
+        # generated summary. The retraining task is:
+        # original_summary -> edited_summary.
         "input_transcript": original_summary,
 
         "target_summary": edited_summary,
@@ -424,7 +370,6 @@ def split_examples(
             else:
                 train_rows.extend(rows)
 
-        # Safety fallback if validation accidentally becomes empty.
         if not val_rows and train_rows:
             val_rows = train_rows[:1]
 
@@ -516,65 +461,6 @@ def collect_examples_from_meeting_ids(
     return examples, stats
 
 
-def collect_examples_from_review_ids(
-    reviews: List[Dict[str, Any]],
-) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
-    examples: List[Dict[str, Any]] = []
-
-    skipped_reviews = 0
-    reviews_without_meeting_id = 0
-    errors: List[str] = []
-
-    meeting_cache: Dict[str, Dict[str, Any]] = {}
-    summary_cache: Dict[str, Dict[str, Any]] = {}
-
-    for review in reviews:
-        meeting_id = get_meeting_id_from_review(review)
-
-        if not meeting_id:
-            reviews_without_meeting_id += 1
-            skipped_reviews += 1
-            errors.append(f"review_id={get_review_id(review)} has no meeting_id")
-            continue
-
-        try:
-            if meeting_id not in meeting_cache:
-                meeting_cache[meeting_id] = get_meeting(meeting_id)
-
-            if meeting_id not in summary_cache:
-                summary_cache[meeting_id] = get_summary_by_meeting(meeting_id)
-
-            ex = build_example(
-                meeting_id=meeting_id,
-                review=review,
-                summary_record=summary_cache[meeting_id],
-                meeting_record=meeting_cache[meeting_id],
-            )
-
-            if ex is not None:
-                examples.append(ex)
-            else:
-                skipped_reviews += 1
-
-        except Exception as e:
-            skipped_reviews += 1
-            errors.append(
-                f"meeting_id={meeting_id}, review_id={get_review_id(review)}: {e}"
-            )
-            print(
-                f"[WARN] Skipping review_id={get_review_id(review)} "
-                f"meeting_id={meeting_id} due to error: {e}"
-            )
-
-    stats = {
-        "skipped_reviews": skipped_reviews,
-        "reviews_without_meeting_id": reviews_without_meeting_id,
-        "errors": errors,
-    }
-
-    return examples, stats
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -584,38 +470,20 @@ def main():
     )
     args = parser.parse_args()
 
-    meeting_ids, meeting_id_source = get_meeting_ids()
-    review_id_reviews, review_id_source = get_reviews_from_review_ids()
+    meeting_ids, meeting_id_source, meeting_id_errors = get_meeting_ids()
 
     print(f"[INFO] Loaded {len(meeting_ids)} meeting_id(s) from {meeting_id_source}")
 
-    if review_id_source:
-        print(f"[INFO] Loaded {len(review_id_reviews)} review(s) from {review_id_source}")
-
     examples: List[Dict[str, Any]] = []
-
-    meeting_stats = {
+    collection_stats = {
         "skipped_meetings": 0,
         "skipped_reviews": 0,
         "total_reviews_seen": 0,
         "errors": [],
     }
 
-    review_id_stats = {
-        "skipped_reviews": 0,
-        "reviews_without_meeting_id": 0,
-        "errors": [],
-    }
-
     if meeting_ids:
-        meeting_examples, meeting_stats = collect_examples_from_meeting_ids(meeting_ids)
-        examples.extend(meeting_examples)
-
-    if review_id_reviews:
-        review_id_examples, review_id_stats = collect_examples_from_review_ids(
-            review_id_reviews
-        )
-        examples.extend(review_id_examples)
+        examples, collection_stats = collect_examples_from_meeting_ids(meeting_ids)
 
     # De-duplicate by review fingerprint.
     deduped: Dict[str, Dict[str, Any]] = {}
@@ -628,9 +496,8 @@ def main():
     if not examples and not args.write_empty:
         raise RuntimeError(
             "No eligible retraining examples were built from API review data. "
-            "Check meeting IDs, review IDs, /reviews/by_meeting/{meeting_id}, "
-            "/reviews/{review_id}, /summaries/by_meeting/{meeting_id}, ratings, "
-            "approved flag, and edited_summary."
+            "Check /meetings, /reviews/by_meeting/{meeting_id}, "
+            "/summaries/by_meeting/{meeting_id}, edited_summary, and filtering thresholds."
         )
 
     if examples:
@@ -643,8 +510,8 @@ def main():
     write_jsonl(TEST_PATH, test_rows)
 
     all_errors: List[str] = []
-    all_errors.extend(meeting_stats.get("errors", []))
-    all_errors.extend(review_id_stats.get("errors", []))
+    all_errors.extend(meeting_id_errors)
+    all_errors.extend(collection_stats.get("errors", []))
 
     stats = {
         "task_type": "summary_correction",
@@ -656,14 +523,9 @@ def main():
         ),
         "meeting_id_source": meeting_id_source,
         "meeting_ids_loaded": len(meeting_ids),
-        "review_id_source": review_id_source,
-        "review_ids_loaded": len(review_id_reviews),
-        "total_reviews_seen": meeting_stats.get("total_reviews_seen", 0)
-        + len(review_id_reviews),
-        "skipped_meetings": meeting_stats.get("skipped_meetings", 0),
-        "skipped_reviews": meeting_stats.get("skipped_reviews", 0)
-        + review_id_stats.get("skipped_reviews", 0),
-        "reviews_without_meeting_id": review_id_stats.get("reviews_without_meeting_id", 0),
+        "total_reviews_seen": collection_stats.get("total_reviews_seen", 0),
+        "skipped_meetings": collection_stats.get("skipped_meetings", 0),
+        "skipped_reviews": collection_stats.get("skipped_reviews", 0),
         "eligible_examples": len(examples),
         "unique_meetings_used": len({x["meeting_id"] for x in examples}),
         "train_examples": len(train_rows),
