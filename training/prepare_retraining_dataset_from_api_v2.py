@@ -220,9 +220,38 @@ def get_reviews_by_meeting(meeting_id: str) -> List[Dict[str, Any]]:
     return normalize_payload_to_list(payload)
 
 
-def get_summary_by_meeting(meeting_id: str) -> Dict[str, Any]:
-    payload = get_json(f"/summaries/by_meeting/{meeting_id}")
+def get_transcript_by_meeting(meeting_id: str) -> Dict[str, Any]:
+    payload = get_json(f"/transcripts/by_meeting/{meeting_id}")
     return normalize_payload_to_dict(payload)
+
+
+def get_summary_by_meeting(meeting_id: str) -> Dict[str, Any]:
+    try:
+        payload = get_json(f"/summaries/by_meeting/{meeting_id}")
+        return normalize_payload_to_dict(payload)
+    except Exception as e:
+        print(f"[WARN] Could not fetch summary for meeting {meeting_id}: {e}")
+        return {}
+
+
+def extract_transcript_text(
+    transcript_record: Optional[Dict[str, Any]],
+    review: Optional[Dict[str, Any]] = None,
+) -> str:
+    transcript_record = transcript_record or {}
+    review = review or {}
+
+    return str(
+        transcript_record.get("transcript_text")
+        or transcript_record.get("transcript")
+        or transcript_record.get("text")
+        or transcript_record.get("content")
+        or transcript_record.get("raw_text")
+        or review.get("input_transcript")
+        or review.get("transcript")
+        or review.get("transcript_text")
+        or ""
+    ).strip()
 
 
 def extract_original_summary(
@@ -264,6 +293,7 @@ def review_fingerprint(meeting_id: str, review: Dict[str, Any]) -> str:
 def build_example(
     meeting_id: str,
     review: Dict[str, Any],
+    transcript_record: Optional[Dict[str, Any]] = None,
     summary_record: Optional[Dict[str, Any]] = None,
     meeting_record: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
@@ -287,10 +317,12 @@ def build_example(
     if len(edited_summary) < MIN_SUMMARY_CHARS:
         return None
 
-    original_summary = extract_original_summary(summary_record, review)
+    transcript_text = extract_transcript_text(transcript_record, review)
 
-    if not original_summary:
+    if not transcript_text:
         return None
+
+    original_summary = extract_original_summary(summary_record, review)
 
     audio_object_key = ""
     if meeting_record:
@@ -301,14 +333,16 @@ def build_example(
     return {
         "meeting_id": meeting_id,
 
-        # For compatibility with train.py/config.yaml, the field name remains
-        # input_transcript. In this version, the value is actually the original
-        # generated summary. The retraining task is:
-        # original_summary -> edited_summary.
-        "input_transcript": original_summary,
-
+        # Main supervised training pair:
+        # input_transcript -> target_summary
+        # The input is the transcript from /transcripts/by_meeting/{meeting_id}.
+        # The target is the user corrected summary from /reviews/by_meeting/{meeting_id}.
+        "input_transcript": transcript_text,
         "target_summary": edited_summary,
+
+        # Keep original_summary as metadata/evidence of the model's previous output.
         "original_summary": original_summary,
+
         "rating": rating,
         "approved": approved,
         "correction_label": correction_label,
@@ -316,7 +350,7 @@ def build_example(
         "review_notes": review_notes,
         "edited_action_items": edited_action_items,
         "audio_object_key": audio_object_key,
-        "source": "reviews_api_summary_correction",
+        "source": "reviews_api_transcript_to_edited_summary",
         "source_review_id": get_review_id(review),
         "source_review_fingerprint": fp,
     }
@@ -420,12 +454,16 @@ def collect_examples_from_meeting_ids(
     errors: List[str] = []
 
     meeting_cache: Dict[str, Dict[str, Any]] = {}
+    transcript_cache: Dict[str, Dict[str, Any]] = {}
     summary_cache: Dict[str, Dict[str, Any]] = {}
 
     for meeting_id in meeting_ids:
         try:
             if meeting_id not in meeting_cache:
                 meeting_cache[meeting_id] = get_meeting(meeting_id)
+
+            if meeting_id not in transcript_cache:
+                transcript_cache[meeting_id] = get_transcript_by_meeting(meeting_id)
 
             if meeting_id not in summary_cache:
                 summary_cache[meeting_id] = get_summary_by_meeting(meeting_id)
@@ -437,6 +475,7 @@ def collect_examples_from_meeting_ids(
                 ex = build_example(
                     meeting_id=meeting_id,
                     review=review,
+                    transcript_record=transcript_cache[meeting_id],
                     summary_record=summary_cache[meeting_id],
                     meeting_record=meeting_cache[meeting_id],
                 )
@@ -497,7 +536,7 @@ def main():
         raise RuntimeError(
             "No eligible retraining examples were built from API review data. "
             "Check /meetings, /reviews/by_meeting/{meeting_id}, "
-            "/summaries/by_meeting/{meeting_id}, edited_summary, and filtering thresholds."
+            "/transcripts/by_meeting/{meeting_id}, edited_summary, and filtering thresholds."
         )
 
     if examples:
@@ -514,12 +553,14 @@ def main():
     all_errors.extend(collection_stats.get("errors", []))
 
     stats = {
-        "task_type": "summary_correction",
-        "model_input": "original_summary",
+        "task_type": "transcript_to_edited_summary",
+        "model_input": "transcript",
         "model_target": "edited_summary",
         "note": (
-            "The output JSONL keeps the field name input_transcript for compatibility "
-            "with train.py/config.yaml, but the value is the original generated summary."
+            "The retraining pair is input_transcript -> target_summary. "
+            "input_transcript comes from /transcripts/by_meeting/{meeting_id}. "
+            "target_summary comes from review.edited_summary. "
+            "original_summary is kept as metadata only."
         ),
         "meeting_id_source": meeting_id_source,
         "meeting_ids_loaded": len(meeting_ids),
