@@ -11,6 +11,7 @@
 #   ghcr.io/haowu0521/mlops-proj27/serving-baseline-mlflow:<tag>
 #   ghcr.io/haowu0521/mlops-proj27/serving-asr-mlflow:<tag>
 #   ghcr.io/haowu0521/mlops-proj27/pipeline-worker:<tag>
+#   ghcr.io/haowu0521/mlops-proj27/model-refresher:<tag>
 #   ghcr.io/haowu0521/mlops-proj27/meeting-dashboard:<tag>
 #
 # Tags: `latest` (always) + `<git-sha>` (pinnable).
@@ -158,6 +159,30 @@ jobs:
           tags: |
             ${{ env.REGISTRY }}/${{ github.repository }}/pipeline-worker:latest
             ${{ env.REGISTRY }}/${{ github.repository }}/pipeline-worker:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  model-refresher:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push model-refresher
+        uses: docker/build-push-action@v5
+        with:
+          context: ./pipeline/model-refresher
+          push: true
+          tags: |
+            ${{ env.REGISTRY }}/${{ github.repository }}/model-refresher:latest
+            ${{ env.REGISTRY }}/${{ github.repository }}/model-refresher:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 

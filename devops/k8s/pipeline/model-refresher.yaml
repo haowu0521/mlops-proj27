@@ -1,0 +1,69 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: model-refresher
+  namespace: platform
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: model-refresher
+  namespace: platform
+rules:
+- apiGroups: ["apps"]
+  resources: ["deployments"]
+  verbs: ["get", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: model-refresher
+  namespace: platform
+subjects:
+- kind: ServiceAccount
+  name: model-refresher
+  namespace: platform
+roleRef:
+  kind: Role
+  name: model-refresher
+  apiGroup: rbac.authorization.k8s.io
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: summarizer-model-refresher
+  namespace: platform
+spec:
+  schedule: "*/5 * * * *"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      activeDeadlineSeconds: 300
+      template:
+        spec:
+          serviceAccountName: model-refresher
+          restartPolicy: Never
+          containers:
+          - name: refresher
+            image: ghcr.io/haowu0521/mlops-proj27/model-refresher:latest
+            imagePullPolicy: Always
+            env:
+            - name: MLFLOW_TRACKING_URI
+              value: "http://mlflow.platform.svc.cluster.local:5000"
+            - name: MODEL_NAME
+              value: "jitsi-summarizer"
+            - name: MODEL_ALIAS
+              value: "production"
+            - name: K8S_NAMESPACE
+              value: "platform"
+            - name: DEPLOYMENT_NAME
+              value: "serving-baseline-mlflow"
+            resources:
+              requests:
+                cpu: "50m"
+                memory: "128Mi"
+              limits:
+                cpu: "250m"
+                memory: "256Mi"
