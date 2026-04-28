@@ -6,9 +6,10 @@
 # and will NOT survive a VM rebuild.
 #
 # We override it to carve PVCs out of /mnt/block, which is backed by a
-# Chameleon Cinder volume (proj27-platform, 100GB). Every PVC we create from
-# here on lands under /mnt/block/<pvc-name>, giving us per-service
-# subdirectory isolation on a single persistent volume.
+# Chameleon Cinder volume (proj27-platform, 100GB). The files survive a VM
+# rebuild, but the dynamic PV/PVC binding metadata lives in the old k3s control
+# plane. On a fresh VM, restore/rebind the Postgres and MinIO data before
+# assuming existing MLflow registry state and artifacts will reappear.
 # ---------------------------------------------------------------------------
 apiVersion: v1
 kind: ConfigMap

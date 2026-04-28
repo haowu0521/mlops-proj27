@@ -10,3 +10,4 @@ torch
 sentencepiece
 boto3
 evaluate
+optimum[onnxruntime]

@@ -2,11 +2,13 @@
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# bootstrap.sh — one-command cluster setup for Jitsi + Platform (Postgres,
-# MinIO, MLflow) on k3s.
+# bootstrap.sh — one-command cluster setup for the integrated demo:
+# Jitsi + Postgres + MinIO + MLflow + model serving + automation + dashboard
+# on k3s.
 #
 # Prerequisite: /mnt/block is already mounted (Cinder volume proj27-platform,
-# ext4, UUID in /etc/fstab). See devops/README for the one-time volume setup.
+# ext4, UUID in /etc/fstab). See devops/DEVOPS_README.md for the one-time
+# volume setup.
 #
 # Usage:
 #   bash bootstrap.sh <FLOATING_IP> <JICOFO_PASSWORD> <JVB_PASSWORD>
@@ -30,7 +32,7 @@ HELM="helm"
 NIP_DOMAIN="${FLOATING_IP//./-}.nip.io"
 
 echo "============================================"
-echo " Bootstrap: Jitsi + Platform on k3s"
+echo " Bootstrap: Integrated Jitsi ML system on k3s"
 echo " Floating IP  : $FLOATING_IP"
 echo " nip.io domain: $NIP_DOMAIN"
 echo " Manifests dir: $K8S_DIR"
@@ -44,7 +46,10 @@ if ! mountpoint -q /mnt/block; then
     echo "  Attach the Cinder volume and mount it before running bootstrap."
     exit 1
 fi
-echo "[0/9] /mnt/block is mounted. $(df -h /mnt/block | tail -1 | awk '{print $4" free"}')"
+echo "[0/12] /mnt/block is mounted. $(df -h /mnt/block | tail -1 | awk '{print $4" free"}')"
+echo "      NOTE: /mnt/block preserves files, but a fresh k3s control plane will"
+echo "      not automatically recreate old PV/PVC bindings. Restore or rebind"
+echo "      Postgres/MinIO data before expecting old MLflow models to be present."
 
 # ---------------------------------------------------------------------------
 # 0b. Redirect k3s containerd image store onto /mnt/block
@@ -121,7 +126,7 @@ fi
 # 1. Install k3s (skip if already installed)
 # ------------------------------------------------------------------
 if ! command -v k3s &> /dev/null; then
-    echo "[1/9] Installing k3s ..."
+    echo "[1/12] Installing k3s ..."
     curl -sfL https://get.k3s.io | sh -
     echo "Waiting for k3s node to register ..."
     until $KUBECTL get nodes 2>/dev/null | grep -q " Ready"; do
@@ -129,17 +134,17 @@ if ! command -v k3s &> /dev/null; then
     done
     echo "k3s node is Ready."
 else
-    echo "[1/9] k3s already installed, skipping."
+    echo "[1/12] k3s already installed, skipping."
 fi
 
 # ------------------------------------------------------------------
 # 2. Install helm (skip if already installed)
 # ------------------------------------------------------------------
 if ! command -v helm &> /dev/null; then
-    echo "[2/9] Installing helm ..."
+    echo "[2/12] Installing helm ..."
     curl -fsSL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash
 else
-    echo "[2/9] helm already installed, skipping."
+    echo "[2/12] helm already installed, skipping."
 fi
 
 # Point helm at k3s kubeconfig
@@ -154,7 +159,7 @@ $HELM repo update >/dev/null
 # ------------------------------------------------------------------
 # 3. Reconfigure local-path provisioner -> /mnt/block
 # ------------------------------------------------------------------
-echo "[3/9] Pointing local-path StorageClass at /mnt/block ..."
+echo "[3/12] Pointing local-path StorageClass at /mnt/block ..."
 $KUBECTL apply -f "$K8S_DIR/storage.yaml"
 # Restart local-path-provisioner so it picks up the new config
 $KUBECTL -n kube-system rollout restart deployment local-path-provisioner || true
@@ -162,14 +167,14 @@ $KUBECTL -n kube-system rollout restart deployment local-path-provisioner || tru
 # ------------------------------------------------------------------
 # 4. Create namespaces
 # ------------------------------------------------------------------
-echo "[4/9] Creating namespaces ..."
+echo "[4/12] Creating namespaces ..."
 $KUBECTL create namespace jitsi    --dry-run=client -o yaml | $KUBECTL apply -f -
 $KUBECTL create namespace platform --dry-run=client -o yaml | $KUBECTL apply -f -
 
 # ------------------------------------------------------------------
 # 5. Create Jitsi secrets + TLS
 # ------------------------------------------------------------------
-echo "[5/9] Creating Jitsi secrets ..."
+echo "[5/12] Creating Jitsi secrets ..."
 $KUBECTL create secret generic jitsi-secrets \
     --from-literal=JICOFO_AUTH_PASSWORD="$JICOFO_PASS" \
     --from-literal=JVB_AUTH_PASSWORD="$JVB_PASS" \
@@ -212,7 +217,7 @@ fi
 # ------------------------------------------------------------------
 # 6. Deploy platform services: Postgres + MinIO (via Helm)
 # ------------------------------------------------------------------
-echo "[6/9] Deploying Postgres ..."
+echo "[6/12] Deploying Postgres ..."
 $HELM upgrade --install postgres bitnami/postgresql \
     -n platform \
     -f "$K8S_DIR/postgres/values.yaml" \
@@ -233,7 +238,7 @@ $KUBECTL -n platform wait --for=condition=complete --timeout=5m job/minio-create
 # ------------------------------------------------------------------
 # 7. Deploy MLflow (depends on Postgres + MinIO)
 # ------------------------------------------------------------------
-echo "[7/10] Deploying MLflow ..."
+echo "[7/12] Deploying MLflow ..."
 $KUBECTL apply -f "$K8S_DIR/mlflow/mlflow.yaml"
 
 # ------------------------------------------------------------------
@@ -243,7 +248,7 @@ $KUBECTL apply -f "$K8S_DIR/mlflow/mlflow.yaml"
 # /home/cc/mlops-proj27 on the node. If you clone elsewhere, edit the
 # hostPath in devops/k8s/data/api.yaml before running bootstrap.
 # ------------------------------------------------------------------
-echo "[7b/10] Deploying data-api ..."
+echo "[7b/12] Deploying data-api ..."
 if [ ! -d "/home/cc/mlops-proj27/data/sql" ]; then
     echo "  WARNING: /home/cc/mlops-proj27/data/sql not found on node."
     echo "  The data-api-init-db Job will fail until the repo is cloned there,"
@@ -255,7 +260,13 @@ $KUBECTL -n platform wait --for=condition=complete --timeout=5m \
     job/data-api-init-db || true
 
 # ------------------------------------------------------------------
-# 7c. Deploy serving-baseline-mlflow (summarizer backed by MLflow registry)
+# 7c. Deploy Adminer for DB inspection during demos
+# ------------------------------------------------------------------
+echo "[7c/12] Deploying Adminer ..."
+$KUBECTL apply -f "$K8S_DIR/postgres/adminer.yaml"
+
+# ------------------------------------------------------------------
+# 7d. Deploy serving-baseline-mlflow (summarizer backed by MLflow registry)
 #
 # Requires:
 #   - MLflow reachable at mlflow.platform.svc.cluster.local:5000
@@ -264,13 +275,41 @@ $KUBECTL -n platform wait --for=condition=complete --timeout=5m \
 #     in MLflow. If missing, the pod will CrashLoopBackOff until the alias
 #     is set — this is intentional (fail loud on missing model).
 # ------------------------------------------------------------------
-echo "[7c/10] Deploying serving-baseline-mlflow ..."
+echo "[7d/12] Deploying serving-baseline-mlflow ..."
 $KUBECTL apply -f "$K8S_DIR/serving/baseline-mlflow.yaml"
+
+# ------------------------------------------------------------------
+# 7e. Deploy ASR serving (also backed by MLflow registry)
+#
+# Requires a registered model named 'jitsi-asr' with alias 'production'.
+# This service handles /predict and /process-meeting for recorded Jitsi files.
+# ------------------------------------------------------------------
+echo "[7e/12] Deploying serving-asr-mlflow ..."
+$KUBECTL apply -f "$K8S_DIR/serving/asr-mlflow.yaml"
+
+# ------------------------------------------------------------------
+# 7f. Deploy Streamlit dashboard
+# ------------------------------------------------------------------
+echo "[7f/12] Deploying meeting-dashboard ..."
+$KUBECTL apply -f "$K8S_DIR/dashboard/streamlit.yaml"
+
+# ------------------------------------------------------------------
+# 7g. Deploy automation CronJobs
+#
+# pipeline-worker:
+#   checks new jitsi_recording meetings and runs ASR -> summarizer -> DB update.
+# summarizer-model-refresher:
+#   watches MLflow jitsi-summarizer@production and restarts summarizer serving
+#   when the production alias moves to a new model version.
+# ------------------------------------------------------------------
+echo "[7g/12] Deploying automation CronJobs ..."
+$KUBECTL apply -f "$K8S_DIR/pipeline/worker.yaml"
+$KUBECTL apply -f "$K8S_DIR/pipeline/model-refresher.yaml"
 
 # ------------------------------------------------------------------
 # 8. Deploy monitoring (Prometheus + Grafana)
 # ------------------------------------------------------------------
-echo "[8/10] Deploying Prometheus + Grafana ..."
+echo "[8/12] Deploying Prometheus + Grafana ..."
 $KUBECTL create namespace monitoring --dry-run=client -o yaml | $KUBECTL apply -f -
 $HELM upgrade --install monitoring prometheus-community/kube-prometheus-stack \
     -n monitoring \
@@ -280,7 +319,7 @@ $HELM upgrade --install monitoring prometheus-community/kube-prometheus-stack \
 # ------------------------------------------------------------------
 # 9. Deploy Jitsi (substitute placeholders then apply)
 # ------------------------------------------------------------------
-echo "[9/10] Deploying Jitsi ..."
+echo "[9/12] Deploying Jitsi ..."
 
 PROSODY_CLUSTER_IP=""
 
@@ -314,7 +353,7 @@ apply_jitsi_manifest "$K8S_DIR/jitsi/jibri.yaml"
 # ------------------------------------------------------------------
 # 10. Verify
 # ------------------------------------------------------------------
-echo "[10/10] Waiting for all deployments ..."
+echo "[10/12] Waiting for all deployments ..."
 
 for deploy in prosody jicofo jvb web jibri; do
     until $KUBECTL get deployment "$deploy" -n jitsi 2>/dev/null | grep -q "1/1"; do
@@ -323,12 +362,15 @@ for deploy in prosody jicofo jvb web jibri; do
     echo "      jitsi/$deploy: ready"
 done
 
-for deploy in mlflow data-api serving-baseline-mlflow; do
+for deploy in minio mlflow data-api adminer serving-baseline-mlflow serving-asr-mlflow meeting-dashboard; do
     until $KUBECTL get deployment "$deploy" -n platform 2>/dev/null | grep -q "1/1"; do
         sleep 5
     done
     echo "      platform/$deploy: ready"
 done
+
+echo "      platform CronJobs:"
+$KUBECTL -n platform get cronjob pipeline-worker summarizer-model-refresher || true
 
 echo ""
 echo "============================================"
@@ -340,7 +382,10 @@ echo ""
 echo " Jitsi         : https://$NIP_DOMAIN"
 echo " MLflow        : http://$FLOATING_IP:30500"
 echo " Data API      : http://$FLOATING_IP:30800  (Swagger UI: /docs)"
-echo " Summarizer    : http://$FLOATING_IP:30810  (POST /predict)"
+echo " Summarizer    : http://$FLOATING_IP:30810  (POST /predict, /process-meeting)"
+echo " ASR           : http://$FLOATING_IP:30811  (POST /predict, /process-meeting)"
+echo " Dashboard     : http://$FLOATING_IP:30820"
+echo " Adminer       : http://$FLOATING_IP:30808"
 echo " MinIO console : http://$FLOATING_IP:30901"
 echo " Grafana       : http://$FLOATING_IP:30300 (admin / admin123)"
 echo " Prometheus    : http://$FLOATING_IP:30090"
